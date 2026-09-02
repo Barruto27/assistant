@@ -1,0 +1,9 @@
+# Development happens on Windows, deployment is a Linux home server. Force LF in
+# the repo so checked-out files work on the server — a systemd unit or shell
+# script with CRLF endings fails in confusing ways.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.pdf binary
+*.sqlite3 binary

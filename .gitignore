@@ -6,3 +6,11 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+
+# Runtime artifacts
+logs/
+
+# Keep the directory, never its contents (git can't re-include a file whose
+# parent directory is excluded, so exclude the contents rather than the dir).
+secrets/*
+!secrets/.gitkeep
