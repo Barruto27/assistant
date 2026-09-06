@@ -1,18 +1,19 @@
-"""Bot entry point (plan Section 1).
+"""Bot entry point (plan Sections 1 and 4).
 
 Run from the repo root::
 
     python -m bot.main
 
-Session 1 scope: the bot is alive, answers /start and /status for Kaan only,
-and logs-and-ignores anyone else. Message classification and routing arrive in
-Session 4 — see the TODO at the bottom.
+Answers /start and /status, and routes any other text through the classify ->
+handle -> receipt pipeline in ``bot.router``. Everything is restricted to
+OWNER_TELEGRAM_ID; other senders are logged and ignored without a reply.
 """
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
-from typing import Any
+import threading
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -25,6 +26,8 @@ from telegram.ext import (
     filters,
 )
 
+from bot import router
+from bot.claude_client import AnthropicClassifier
 from bot.config import ConfigError, Settings, load_settings
 from bot.errors import AssistantError, E, log_error, logger, setup_logging
 from db import database
@@ -32,6 +35,11 @@ from db import database
 # Stashed on Application.bot_data so handlers can reach them without globals.
 KEY_SETTINGS = "settings"
 KEY_DB = "db"
+KEY_CLASSIFIER = "classifier"
+
+# The Claude call is blocking, so it runs in a worker thread. This lock keeps two
+# messages from interleaving their DB transactions while it does.
+_db_lock = threading.Lock()
 
 
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
@@ -49,8 +57,8 @@ def _db(context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Connection:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Up and running. Nothing clever wired in yet — /status shows what's "
-        "actually working so far."
+        "Up and running. Text me a task, a reminder, or a goal and I'll save it. "
+        "/status shows what's on file."
     )
 
 
@@ -71,9 +79,11 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
             E.DB_READ, "Couldn't read the database.", cause=exc, trigger="/status"
         ) from exc
 
+    parsing = "on" if context.application.bot_data.get(KEY_CLASSIFIER) else "OFF (no API key)"
     rows = "\n".join(f"  {name}: {n}" for name, n in counts.items())
     await update.effective_message.reply_text(
         f"<b>Schema</b> v{version}\n"
+        f"<b>Message parsing</b> {parsing}\n"
         f"<b>Semester start</b> {semester_start}\n"
         f"<b>Brief</b> {brief_time} ({timezone})\n"
         f"<b>Rows</b>\n{rows}",
@@ -82,7 +92,7 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def on_unknown_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Log-and-ignore. Never replies — an unknown sender learns nothing."""
+    """Log-and-ignore. Never replies, so an unknown sender learns nothing."""
     user = update.effective_user
     logger.warning(
         "Ignored message from non-owner id=%s username=%s",
@@ -92,11 +102,25 @@ async def on_unknown_user(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Placeholder until Session 4 wires in classification and routing."""
-    await update.effective_message.reply_text(
-        "I can hear you, but message parsing isn't built yet (Session 4). "
-        "/start and /status work."
-    )
+    """Classify one message, run its handler, reply with the receipt."""
+    classifier = context.application.bot_data.get(KEY_CLASSIFIER)
+    if classifier is None:
+        await update.effective_message.reply_text(
+            "I can't read messages yet - ANTHROPIC_API_KEY isn't set in .env."
+        )
+        return
+
+    text = update.effective_message.text
+    conn = _db(context)
+
+    def work() -> str:
+        with _db_lock:
+            return router.handle_message(conn, classifier, text)
+
+    # Off the event loop: the Anthropic SDK call is synchronous and would
+    # otherwise stall every other update while it waits.
+    reply = await asyncio.to_thread(work)
+    await update.effective_message.reply_text(reply)
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -119,7 +143,7 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     settings: Settings = context.application.bot_data[KEY_SETTINGS]
     try:
         await context.bot.send_message(settings.owner_telegram_id, user_text)
-    except Exception as exc:  # noqa: BLE001 — last resort; nothing left to escalate to
+    except Exception as exc:  # noqa: BLE001 - last resort; nothing left to escalate to
         log_error(
             AssistantError(
                 E.TELEGRAM_SEND, "Couldn't deliver an error message.", cause=exc
@@ -153,12 +177,20 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     )
     app.bot_data[KEY_SETTINGS] = settings
     app.bot_data[KEY_DB] = conn
+    if settings.anthropic_api_key:
+        app.bot_data[KEY_CLASSIFIER] = AnthropicClassifier(
+            settings.anthropic_api_key, settings.claude_model
+        )
+    else:
+        logger.warning("ANTHROPIC_API_KEY not set - message parsing is disabled.")
 
     owner_only = filters.User(user_id=settings.owner_telegram_id)
 
     app.add_handler(CommandHandler("start", cmd_start, filters=owner_only))
     app.add_handler(CommandHandler("status", cmd_status, filters=owner_only))
-    app.add_handler(MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, on_message))
+    app.add_handler(
+        MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, on_message)
+    )
     # Anything from anyone else falls through to here.
     app.add_handler(MessageHandler(~owner_only, on_unknown_user))
 
@@ -184,9 +216,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-
-# TODO(Session 4): replace on_message with the classify -> route -> receipt
-# pipeline. Every handler it dispatches to must raise AssistantError with a
-# Section 8 code on failure so on_error stays the only place that talks to
-# Telegram about problems.

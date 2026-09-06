@@ -4,8 +4,19 @@ A Claude-powered Telegram bot for school and life planning. See
 [telegram-assistant-plan.md](telegram-assistant-plan.md) for the full build plan
 — each numbered section there is one working session.
 
-**Current state:** Sessions 1–2 built (foundations, data model). Session 3
-onward is not started.
+**Current state:** Sessions 1, 2 and 4 built (foundations, data model, message
+pipeline). Sessions 3, 5–11 not started.
+
+Text the bot and it saves what you said:
+
+```
+you:  test April 13, psyc 3040, ch 3-5
+bot:  Saved — Test 2, PSYC 3040, due Mon Apr 13, 20%, P1, ch 3-5
+```
+
+Two things it deliberately can't do yet: answer questions about your data
+(needs Session 7's context assembly) and hold a conversation (Session 10). It
+says so plainly rather than guessing.
 
 ## Layout
 
@@ -52,9 +63,13 @@ once those sessions are built.
 ```bash
 python -m scripts.seed --config scripts/data/semester.example.json
 python -m scripts.seed --gym scripts/data/gym.example.json
+python -m scripts.seed --courses scripts/data/courses.example.json
 ```
 
-Both are idempotent upserts, so edit the JSON and re-run.
+All three are idempotent upserts, so edit the JSON and re-run. Load `--courses`
+early: the pipeline uses that list to work out which course a message refers
+to, and without it every task gets tagged with whatever label you happened to
+type.
 
 ## Schema changes
 

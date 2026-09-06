@@ -51,6 +51,28 @@ def seed_gym(conn, path: Path) -> int:
     return len(rows)
 
 
+def seed_courses(conn, path: Path) -> int:
+    """Load a course list into the courses table.
+
+    Accepts either ``{"PSYC 3040": "Cognition", ...}`` or a bare list of codes.
+    The router needs these to disambiguate which course a message refers to, so
+    loading them early is what stops cross-course collisions.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        rows = [(str(code).strip(), None) for code in data]
+    else:
+        rows = [(str(code).strip(), str(name).strip()) for code, name in data.items()]
+
+    with database.transaction(conn):
+        conn.executemany(
+            "INSERT INTO courses (code, name) VALUES (?, ?) "
+            "ON CONFLICT(code) DO UPDATE SET name = COALESCE(excluded.name, name)",
+            rows,
+        )
+    return len(rows)
+
+
 def seed_config(conn, path: Path) -> int:
     """Load ``{"semester_start_date": "2026-09-07", ...}`` into the config table."""
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -63,11 +85,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--gym", type=Path, help="JSON map of weekday -> split name")
     parser.add_argument("--config", type=Path, help="JSON map of config key -> value")
+    parser.add_argument("--courses", type=Path, help="JSON map of course code -> name")
     parser.add_argument("--db", help="SQLite path; defaults to DB_PATH from .env")
     args = parser.parse_args(argv)
 
-    if not args.gym and not args.config:
-        parser.error("nothing to do — pass --gym and/or --config")
+    if not (args.gym or args.config or args.courses):
+        parser.error("nothing to do - pass --gym, --config and/or --courses")
 
     if args.db:
         db_path = Path(args.db)
@@ -85,6 +108,8 @@ def main(argv: list[str] | None = None) -> int:
     setup_logging(log_path)
     conn = database.connect(db_path)
     try:
+        if args.courses:
+            print(f"courses: {seed_courses(conn, args.courses)} course(s) loaded")
         if args.gym:
             print(f"gym: {seed_gym(conn, args.gym)} day(s) loaded")
         if args.config:
