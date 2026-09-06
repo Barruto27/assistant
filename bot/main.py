@@ -14,6 +14,8 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
+from datetime import datetime, time
+from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.constants import ParseMode
@@ -26,8 +28,8 @@ from telegram.ext import (
     filters,
 )
 
-from bot import router
-from bot.claude_client import AnthropicClassifier
+from bot import brief, repository as repo, router
+from bot.claude_client import AnthropicClient
 from bot.config import ConfigError, Settings, load_settings
 from bot.errors import AssistantError, E, log_error, logger, setup_logging
 from db import database
@@ -123,6 +125,91 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     await update.effective_message.reply_text(reply)
 
 
+async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Regenerate the brief on demand, always from current data."""
+    await update.effective_message.chat.send_action("typing")
+    text = await asyncio.to_thread(_build_brief, context.application)
+    await update.effective_message.reply_text(text)
+
+
+async def cmd_quiet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Toggle the morning brief off or on."""
+    conn = _db(context)
+    with _db_lock:
+        now_quiet = database.get_config(conn, "quiet_morning", "0") == "1"
+        database.set_config(conn, "quiet_morning", "0" if now_quiet else "1")
+    await update.effective_message.reply_text(
+        "Morning brief back on." if now_quiet else "Morning brief off. /quiet again to undo."
+    )
+
+
+def _build_brief(app: Application) -> str:
+    """Assemble and write the brief. Blocking; call via asyncio.to_thread."""
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+    writer = app.bot_data.get(KEY_CLASSIFIER)
+
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        token = settings.google_token_personal
+        context = brief.assemble(
+            conn,
+            now=datetime.now(ZoneInfo(timezone)),
+            timezone=timezone,
+            latitude=settings.weather_latitude,
+            longitude=settings.weather_longitude,
+            calendar_token=token if token.exists() else None,
+            calendar_secrets=settings.google_client_secrets,
+        )
+    return brief.generate(context, writer)
+
+
+async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Scheduled daily send."""
+    app = context.application
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+    if database.get_config(conn, "quiet_morning", "0") == "1":
+        logger.info("Morning brief suppressed by /quiet")
+        return
+
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    try:
+        text = await asyncio.to_thread(_build_brief, app)
+    except Exception as exc:  # noqa: BLE001 - the job must never die silently
+        raise AssistantError(
+            E.BRIEF_FAILED, "Couldn't put the morning brief together.", cause=exc
+        ) from exc
+    await context.bot.send_message(settings.owner_telegram_id, text)
+
+
+async def job_poll_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Send any reminder whose time has passed, once (plan Section 8)."""
+    app = context.application
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        due = repo.due_reminders(conn, datetime.now(ZoneInfo(timezone)))
+
+    for reminder in due:
+        try:
+            await context.bot.send_message(
+                settings.owner_telegram_id, reminder["text"]
+            )
+        except Exception as exc:  # noqa: BLE001
+            log_error(
+                AssistantError(
+                    E.REMINDER_FIRE_FAILED,
+                    f"Couldn't send reminder {reminder['id']}.",
+                    cause=exc,
+                )
+            )
+            continue  # leave it unsent so the next tick retries
+        with _db_lock:
+            repo.mark_reminder_sent(conn, reminder["id"])
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Single funnel for every failure: log the detail, tell Kaan the code."""
     err = context.error
@@ -178,7 +265,7 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.bot_data[KEY_SETTINGS] = settings
     app.bot_data[KEY_DB] = conn
     if settings.anthropic_api_key:
-        app.bot_data[KEY_CLASSIFIER] = AnthropicClassifier(
+        app.bot_data[KEY_CLASSIFIER] = AnthropicClient(
             settings.anthropic_api_key, settings.claude_model
         )
     else:
@@ -188,6 +275,8 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
 
     app.add_handler(CommandHandler("start", cmd_start, filters=owner_only))
     app.add_handler(CommandHandler("status", cmd_status, filters=owner_only))
+    app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
+    app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
     app.add_handler(
         MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, on_message)
     )
@@ -195,7 +284,28 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(MessageHandler(~owner_only, on_unknown_user))
 
     app.add_error_handler(on_error)
+    _schedule_jobs(app, conn)
     return app
+
+
+def _schedule_jobs(app: Application, conn: sqlite3.Connection) -> None:
+    """Daily brief and the reminder poller, both driven by config values."""
+    timezone = ZoneInfo(database.get_config(conn, "timezone", "America/Toronto"))
+    raw = database.get_config(conn, "brief_send_time", "07:30")
+    try:
+        hour, minute = (int(part) for part in raw.split(":", 1))
+        send_at = time(hour, minute, tzinfo=timezone)
+    except ValueError:
+        logger.warning("brief_send_time %r isn't HH:MM; defaulting to 07:30", raw)
+        send_at = time(7, 30, tzinfo=timezone)
+
+    app.job_queue.run_daily(job_morning_brief, send_at, name="morning_brief")
+
+    interval = int(database.get_config(conn, "reminder_poll_seconds", "60"))
+    app.job_queue.run_repeating(
+        job_poll_reminders, interval=interval, first=interval, name="reminder_poller"
+    )
+    logger.info("Scheduled morning brief at %s (%s)", send_at.strftime("%H:%M"), timezone)
 
 
 def main() -> None:

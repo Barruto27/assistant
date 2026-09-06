@@ -4,8 +4,8 @@ A Claude-powered Telegram bot for school and life planning. See
 [telegram-assistant-plan.md](telegram-assistant-plan.md) for the full build plan
 — each numbered section there is one working session.
 
-**Current state:** Sessions 1, 2 and 4 built (foundations, data model, message
-pipeline). Sessions 3, 5–11 not started.
+**Current state:** Sessions 1, 2, 4, 6 (calendar half) and 7 built. Sessions 3,
+5, and 8–11 not started.
 
 Text the bot and it saves what you said:
 
@@ -112,6 +112,52 @@ the code; `logs/assistant.log` gets the stack trace and triggering input.
 | `E5xx` | scheduler / jobs |
 
 Defined in [bot/errors.py](bot/errors.py).
+
+## Commands
+
+| Command | What it does |
+| --- | --- |
+| `/start` | Confirms the bot is alive |
+| `/status` | Schema version, whether parsing is on, row counts |
+| `/recap` | Regenerates the morning brief now, from current data |
+| `/quiet` | Toggles the scheduled morning brief off and on |
+
+Any other text goes through the classify -> handle -> receipt pipeline.
+
+## Scheduled jobs
+
+Both are started in `_schedule_jobs` and driven by `config` values, so changing
+a time needs no code edit:
+
+- **Morning brief** at `brief_send_time` (default 07:30) in `timezone`.
+- **Reminder poller** every `reminder_poll_seconds` (default 60), sending any
+  reminder whose `fire_at` has passed. A send failure leaves the row unsent so
+  the next tick retries rather than dropping it.
+
+The bot must actually be running for either to fire. On Windows that means
+leaving `python -m bot.main` open in a terminal; on the home server that is what
+the systemd unit is for.
+
+## Google Calendar
+
+One-time setup in the [Google Cloud console](https://console.cloud.google.com):
+
+1. Create a project, then enable the **Google Calendar API**.
+2. **APIs & Services > Credentials > Create OAuth client ID > Desktop app.**
+   Download the JSON to `secrets/google_client_secret.json`.
+3. **Publish the OAuth consent screen.** Left in Testing, Google expires the
+   refresh token every 7 days and the calendar silently goes stale. Publishing
+   an unverified single-user app is fine and takes one click.
+
+Then authorise once:
+
+```bash
+python -m scripts.google_auth
+```
+
+The brief degrades gracefully: with no token it simply omits the calendar
+sections, and if the token later fails it says so rather than pretending the day
+was empty.
 
 ## Remaining Session 1 checklist
 

@@ -80,6 +80,12 @@ class Classifier(Protocol):
     def classify(self, message: str, context: PromptContext) -> ParsedIntent: ...
 
 
+class Writer(Protocol):
+    """Anything that can write prose from a system prompt and a data block."""
+
+    def compose(self, system: str, user: str, *, max_tokens: int = 1024) -> str: ...
+
+
 def build_system_prompt(context: PromptContext) -> str:
     return SYSTEM_PROMPT.format(voice=VOICE, context=context.render())
 
@@ -111,8 +117,12 @@ def parse_tool_use(blocks: list[Any]) -> ParsedIntent:
     )
 
 
-class AnthropicClassifier:
-    """The real client. Constructed lazily so the bot starts without a key."""
+class AnthropicClient:
+    """The real client. Constructed lazily so the bot starts without a key.
+
+    Implements both Classifier (tool-use, for parsing messages) and Writer
+    (plain prose, for the morning brief).
+    """
 
     def __init__(self, api_key: str, model: str, *, max_tokens: int = 1024) -> None:
         from anthropic import Anthropic
@@ -137,6 +147,25 @@ class AnthropicClassifier:
             ) from exc
 
         return parse_tool_use(response.content)
+
+    def compose(self, system: str, user: str, *, max_tokens: int = 1024) -> str:
+        """Free prose, no tools. Used by the brief and check-in."""
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system,
+                messages=[{"role": "user", "content": user}],
+            )
+        except Exception as exc:  # noqa: BLE001 - SDK raises a family of errors
+            raise AssistantError(
+                E.CLAUDE, _explain(exc), cause=exc, trigger=user[:200]
+            ) from exc
+
+        return "".join(
+            block.text for block in response.content
+            if getattr(block, "type", None) == "text"
+        ).strip()
 
 
 def _explain(exc: BaseException) -> str:
