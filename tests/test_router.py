@@ -257,6 +257,31 @@ class RouterTestCase(unittest.TestCase):
         )
         self.assertIn("Nothing on file", reply)
 
+    def test_matches_across_title_and_course(self) -> None:
+        """"finished the psyc test" must find "Test" in PSYC 3040."""
+        repo.add_task(self.conn, title="Test", course="PSYC 3040")
+        reply = self.route(
+            ParsedIntent(
+                name="update_task",
+                fields={"task_query": "PSYC test", "status": "done"},
+            )
+        )
+        self.assertEqual(reply, "Test — done.")
+
+    def test_stopwords_do_not_block_a_match(self) -> None:
+        repo.add_task(self.conn, title="Essay draft", course="ENGL 1000")
+        matches = repo.find_tasks(self.conn, "the essay for my draft")
+        self.assertEqual(len(matches), 1)
+
+    def test_every_word_must_match(self) -> None:
+        repo.add_task(self.conn, title="Test", course="PSYC 3040")
+        # 'midterm' appears in neither column, so this is not a match.
+        self.assertEqual(repo.find_tasks(self.conn, "PSYC midterm"), [])
+
+    def test_all_stopword_query_falls_back_to_raw_string(self) -> None:
+        repo.add_task(self.conn, title="A", course="PSYC 3040")
+        self.assertEqual(len(repo.find_tasks(self.conn, "a")), 1)
+
     # -- gym, goals, notes --------------------------------------------------
 
     def test_set_gym_split_upserts(self) -> None:

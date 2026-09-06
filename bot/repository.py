@@ -106,18 +106,41 @@ def add_task(
     )
 
 
+#: Words that carry no matching signal in a task reference.
+_STOPWORDS = frozenset(
+    {"the", "a", "an", "my", "for", "of", "on", "in", "to", "and", "that", "this"}
+)
+
+
 def find_tasks(
     conn: sqlite3.Connection, query: str, course: str | None = None
 ) -> list[sqlite3.Row]:
-    """Loose title match, newest first, ignoring anything already archived.
+    """Match a loose spoken reference against title *and* course, newest first.
 
-    Deliberately dumb: the router decides what to do with 0, 1, or several
-    matches rather than this guessing at the right one.
+    Every meaningful word must appear somewhere in "title course", rather than
+    the whole phrase having to appear in the title. Kaan says "finished the psyc
+    test" for a task titled "Test" in PSYC 3040: matching the phrase against the
+    title alone finds nothing, because the course words are in a different
+    column.
+
+    Deliberately dumb beyond that: the router decides what to do with 0, 1, or
+    several matches rather than this guessing at the right one.
     """
-    sql = (
-        "SELECT * FROM tasks WHERE status != 'archived' AND title LIKE ? COLLATE NOCASE"
-    )
-    params: list[Any] = [f"%{query.strip()}%"]
+    haystack = "(title || ' ' || COALESCE(course, ''))"
+    sql = "SELECT * FROM tasks WHERE status != 'archived'"
+    params: list[Any] = []
+
+    tokens = [
+        word
+        for word in query.strip().split()
+        if len(word) > 1 and word.lower() not in _STOPWORDS
+    ]
+    # An all-stopword query (or an empty one) falls back to the raw string, so a
+    # deliberate search for something like "a" still behaves predictably.
+    for token in tokens or [query.strip()]:
+        sql += f" AND {haystack} LIKE ? COLLATE NOCASE"
+        params.append(f"%{token}%")
+
     if course:
         sql += " AND course = ? COLLATE NOCASE"
         params.append(course)
