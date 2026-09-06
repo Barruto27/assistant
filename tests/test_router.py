@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from bot import repository as repo  # noqa: E402
 from bot import router  # noqa: E402
-from bot.claude_client import PromptContext, parse_tool_use  # noqa: E402
+from bot.claude_client import PromptContext, _explain, parse_tool_use  # noqa: E402
 from bot.errors import AssistantError, E, setup_logging  # noqa: E402
 from bot.intents import INTENT_NAMES, ParsedIntent  # noqa: E402
 from db import database  # noqa: E402
@@ -356,6 +356,38 @@ class PromptContextTestCase(unittest.TestCase):
         self.assertIn("2026-09-05 14:30", rendered)
         self.assertIn("Saturday", rendered)
         self.assertIn("No courses are on file", rendered)
+
+
+class ApiErrorMessageTestCase(unittest.TestCase):
+    """A billing problem must not read as a network problem (Section 8)."""
+
+    class _Status(Exception):
+        def __init__(self, message: str, status_code: int | None = None) -> None:
+            super().__init__(message)
+            self.status_code = status_code
+
+    def test_low_credit_names_the_actual_fix(self) -> None:
+        exc = self._Status(
+            "Error code: 400 - Your credit balance is too low to access the "
+            "Anthropic API. Please go to Plans & Billing.",
+            400,
+        )
+        explained = _explain(exc)
+        self.assertIn("credits", explained)
+        self.assertIn("console.anthropic.com", explained)
+        self.assertNotIn("reach Claude", explained)
+
+    def test_bad_key_points_at_the_env_file(self) -> None:
+        self.assertIn("ANTHROPIC_API_KEY", _explain(self._Status("unauthorized", 401)))
+
+    def test_rate_limit_says_retry(self) -> None:
+        self.assertIn("rate limit", _explain(self._Status("slow down", 429)))
+
+    def test_unknown_failure_stays_generic(self) -> None:
+        self.assertEqual(
+            _explain(self._Status("connection reset")),
+            "Couldn't reach Claude to read that.",
+        )
 
 
 if __name__ == "__main__":

@@ -133,10 +133,33 @@ class AnthropicClassifier:
             )
         except Exception as exc:  # noqa: BLE001 — SDK raises a family of errors
             raise AssistantError(
-                E.CLAUDE,
-                "Couldn't reach Claude to read that.",
-                cause=exc,
-                trigger=message,
+                E.CLAUDE, _explain(exc), cause=exc, trigger=message
             ) from exc
 
         return parse_tool_use(response.content)
+
+
+def _explain(exc: BaseException) -> str:
+    """Turn an SDK exception into something actionable.
+
+    "Couldn't reach Claude" is misleading for a billing or key problem, which
+    needs a specific fix in the Anthropic console rather than a retry. The
+    account-level cases are worth naming; everything else stays generic and the
+    detail goes to the log.
+    """
+    status = getattr(exc, "status_code", None)
+    detail = str(exc).lower()
+
+    if "credit balance is too low" in detail:
+        return (
+            "Out of Anthropic API credits. Add some at console.anthropic.com "
+            "under Plans & Billing — note that a Claude.ai subscription is "
+            "billed separately and doesn't cover API use."
+        )
+    if status == 401:
+        return "Anthropic rejected the API key. Check ANTHROPIC_API_KEY in .env."
+    if status == 403:
+        return "That API key isn't allowed to use this model."
+    if status == 429:
+        return "Hit the Anthropic rate limit. Try again in a moment."
+    return "Couldn't reach Claude to read that."
