@@ -38,6 +38,7 @@ from bot import (
     repository as repo,
     router,
     syllabus as syl,
+    testmode,
 )
 from bot.claude_client import AnthropicClient
 from bot.config import ConfigError, Settings, load_settings
@@ -92,9 +93,12 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         ) from exc
 
     parsing = "on" if context.application.bot_data.get(KEY_CLASSIFIER) else "OFF (no API key)"
+    banner = testmode.banner(conn)
     rows = "\n".join(f"  {name}: {n}" for name, n in counts.items())
     await update.effective_message.reply_text(
-        f"<b>Schema</b> v{version}\n"
+        (f"<b>{banner}/testoff discards everything since it started</b>\n\n"
+         if banner else "")
+        + f"<b>Schema</b> v{version}\n"
         f"<b>Message parsing</b> {parsing}\n"
         f"<b>Semester start</b> {semester_start}\n"
         f"<b>Brief</b> {brief_time} ({timezone})\n"
@@ -171,7 +175,9 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # Off the event loop: the Anthropic SDK call is synchronous and would
     # otherwise stall every other update while it waits.
     reply = await asyncio.to_thread(work)
-    await update.effective_message.reply_text(reply)
+    with _db_lock:
+        prefix = testmode.banner(conn)
+    await update.effective_message.reply_text(prefix + reply)
 
 
 async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -279,6 +285,37 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.chat.send_action("typing")
     text = await asyncio.to_thread(_build_brief, context.application)
     await update.effective_message.reply_text(text)
+
+
+async def cmd_teston(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Snapshot the database so everything from here can be thrown away.
+
+    Exists because testing against the live database left a fabricated reminder
+    due to fire that evening and two real tasks marked done, one of them an
+    attendance mark for a lecture that had not happened yet.
+    """
+    conn = _db(context)
+    settings = _settings(context)
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        testmode.start(conn, settings.db_path, datetime.now(ZoneInfo(timezone)))
+    await update.effective_message.reply_text(
+        "TEST MODE ON.\n\n"
+        "Everything from here - tasks, reminders, status changes - is thrown "
+        "away by /testoff.\n\n"
+        "That includes anything real you enter meanwhile, so don't."
+    )
+
+
+async def cmd_testoff(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Roll back to the snapshot taken by /teston."""
+    conn = _db(context)
+    settings = _settings(context)
+    with _db_lock:
+        summary = testmode.stop(conn, settings.db_path)
+    await update.effective_message.reply_text(
+        "Test mode off. Rolled back: " + summary.describe() + "."
+    )
 
 
 async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -668,6 +705,8 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
     app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
     app.add_handler(CommandHandler("backlog", cmd_backlog, filters=owner_only))
+    app.add_handler(CommandHandler("teston", cmd_teston, filters=owner_only))
+    app.add_handler(CommandHandler("testoff", cmd_testoff, filters=owner_only))
     app.add_handler(
         MessageHandler(owner_only & filters.Document.ALL, on_document)
     )
