@@ -179,7 +179,18 @@ async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
         raise AssistantError(
             E.BRIEF_FAILED, "Couldn't put the morning brief together.", cause=exc
         ) from exc
-    await context.bot.send_message(settings.owner_telegram_id, text)
+
+    try:
+        await context.bot.send_message(settings.owner_telegram_id, text)
+    except Exception as exc:  # noqa: BLE001
+        raise AssistantError(
+            E.BRIEF_FAILED, "Built the morning brief but couldn't send it.", cause=exc
+        ) from exc
+
+    # Log the send explicitly. Without this a successful brief leaves no trace,
+    # so "did it go out?" can only be answered by asking Kaan whether his phone
+    # buzzed — which is no way to debug a job that runs while he's asleep.
+    logger.info("Morning brief sent (%d chars)", len(text))
 
 
 async def job_poll_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
