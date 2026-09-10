@@ -275,5 +275,51 @@ class ReceiptTestCase(unittest.TestCase):
         self.assertIn("Replaced 4 earlier items", text)
 
 
+class TypeCoercionTestCase(unittest.TestCase):
+    """A tool-schema enum is a hint, not a guarantee.
+
+    A real upload returned a type outside the enum and the CHECK constraint
+    rejected the whole syllabus, losing every item in it.
+    """
+
+    def test_valid_types_pass_through(self) -> None:
+        for value in ("assignment", "test", "exam", "homework", "reading", "other"):
+            with self.subTest(value=value):
+                self.assertEqual(syl._coerce_type(value), value)
+
+    def test_known_aliases_map_to_something_meaningful(self) -> None:
+        self.assertEqual(syl._coerce_type("lab"), "assignment")
+        self.assertEqual(syl._coerce_type("presentation"), "assignment")
+        self.assertEqual(syl._coerce_type("quiz"), "test")
+        self.assertEqual(syl._coerce_type("midterm"), "test")
+        self.assertEqual(syl._coerce_type("final"), "exam")
+
+    def test_case_and_whitespace_are_tolerated(self) -> None:
+        self.assertEqual(syl._coerce_type("  LAB  "), "assignment")
+        self.assertEqual(syl._coerce_type("Exam"), "exam")
+
+    def test_unknown_types_fall_back_rather_than_failing(self) -> None:
+        self.assertEqual(syl._coerce_type("interpretive dance"), "other")
+        self.assertEqual(syl._coerce_type(None), "other")
+        self.assertEqual(syl._coerce_type(""), "other")
+
+    def test_every_coerced_type_satisfies_the_db_constraint(self) -> None:
+        """The real guarantee: whatever comes out, the insert must succeed."""
+        tmp = tempfile.TemporaryDirectory()
+        conn = database.connect(Path(tmp.name) / "t.sqlite3")
+        database.migrate(conn)
+        try:
+            weird = ["lab", "presentation", "interpretive dance", "", None, "QUIZ"]
+            payload = {
+                "course_code": "X 100",
+                "items": [{"title": f"item {i}", "type": v} for i, v in enumerate(weird)],
+            }
+            counts = syl.ingest(conn, syl.parse_extraction(payload))
+            self.assertEqual(counts["tasks"], len(weird))
+        finally:
+            conn.close()
+            tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

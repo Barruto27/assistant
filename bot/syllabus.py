@@ -151,8 +151,45 @@ class Syllabus:
         return sum(item.weight_pct or 0 for item in self.items)
 
 
+#: Mirrors the CHECK constraint on tasks.type. A tool schema enum is a strong
+#: hint, not a guarantee — Claude returned "lab" for a syllabus full of studio
+#: work and the constraint rejected the entire import.
+VALID_TYPES = frozenset(
+    {"assignment", "test", "exam", "homework", "reading", "other"}
+)
+
+#: Common out-of-enum answers worth mapping rather than flattening to "other",
+#: so priority defaults and receipts stay meaningful.
+TYPE_ALIASES = {
+    "lab": "assignment",
+    "project": "assignment",
+    "presentation": "assignment",
+    "essay": "assignment",
+    "paper": "assignment",
+    "quiz": "test",
+    "midterm": "test",
+    "final": "exam",
+    "participation": "other",
+    "discussion": "other",
+}
+
+
 def _clean(value: Any) -> Any:
     return None if value in ("", None) else value
+
+
+def _coerce_type(raw: Any) -> str:
+    """Map whatever came back onto the enum the database will accept."""
+    value = str(_clean(raw) or "other").strip().lower()
+    if value in VALID_TYPES:
+        return value
+    mapped = TYPE_ALIASES.get(value)
+    if mapped:
+        logger.info("Mapped syllabus item type %r to %r", value, mapped)
+        return mapped
+    logger.warning("Unknown syllabus item type %r; recording as 'other'", value)
+    return "other"
+
 
 
 def parse_extraction(payload: dict[str, Any]) -> Syllabus:
@@ -167,7 +204,7 @@ def parse_extraction(payload: dict[str, Any]) -> Syllabus:
     items = [
         SyllabusItem(
             title=str(raw["title"]).strip(),
-            type=_clean(raw.get("type")) or "other",
+            type=_coerce_type(raw.get("type")),
             due_date=_clean(raw.get("due_date")),
             tentative=bool(raw.get("tentative", False)),
             weight_pct=_clean(raw.get("weight_pct")),
