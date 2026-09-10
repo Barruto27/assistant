@@ -38,6 +38,7 @@ from bot import (
     repository as repo,
     router,
     syllabus as syl,
+    term_dates,
     testmode,
 )
 from bot.claude_client import AnthropicClient
@@ -285,6 +286,48 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.chat.send_action("typing")
     text = await asyncio.to_thread(_build_brief, context.application)
     await update.effective_message.reply_text(text)
+
+
+def _read_term_dates(app: Application) -> str:
+    """Read the academic calendar out of Google Calendar and store it."""
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+
+    token = settings.google_token_personal
+    if not token.exists():
+        return "Calendar isn't connected, so I can't read your term dates."
+
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+    now = datetime.now(ZoneInfo(timezone))
+
+    # A full academic year either side, since the exam period and the next
+    # term's start both fall outside the current one.
+    events = google_calendar.list_events(
+        token,
+        settings.google_client_secrets,
+        start=now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0),
+        end=now.replace(year=now.year + 1, month=8, day=31),
+        max_results=250,
+    )
+
+    found = term_dates.find(events, term_year=now.year)
+    with _db_lock:
+        changed = term_dates.apply(conn, found)
+        week = repo.week_number(conn, now.date())
+
+    text = term_dates.render(found, changed)
+    if week is not None:
+        text += f"\n\nThat puts today in week {week}."
+    return text
+
+
+async def cmd_terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-read the academic calendar. Safe to run again after editing it."""
+    await update.effective_message.chat.send_action("typing")
+    await update.effective_message.reply_text(
+        await asyncio.to_thread(_read_term_dates, context.application)
+    )
 
 
 async def cmd_teston(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -705,6 +748,7 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
     app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
     app.add_handler(CommandHandler("backlog", cmd_backlog, filters=owner_only))
+    app.add_handler(CommandHandler("terms", cmd_terms, filters=owner_only))
     app.add_handler(CommandHandler("teston", cmd_teston, filters=owner_only))
     app.add_handler(CommandHandler("testoff", cmd_testoff, filters=owner_only))
     app.add_handler(

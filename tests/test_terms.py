@@ -1,0 +1,146 @@
+"""Reading the academic calendar out of Google Calendar (plan Section 3)."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from datetime import date, datetime, timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+from bot import repository as repo, term_dates  # noqa: E402
+from bot.errors import setup_logging  # noqa: E402
+from bot.google_calendar import CalendarEvent  # noqa: E402
+from db import database  # noqa: E402
+
+setup_logging(Path(tempfile.gettempdir()) / "assistant-tests.log")
+
+
+def allday(name: str, start: str, days: int = 1) -> CalendarEvent:
+    """An all-day event as Google returns it: end date exclusive."""
+    s = date.fromisoformat(start)
+    return CalendarEvent(name, s, s + timedelta(days=days), True, recurring=False)
+
+
+#: Kaan's actual entries, verbatim including the trailing space.
+REAL = [
+    allday("classes start", "2026-09-09"),
+    allday("LAST DAY TO ADD A COURSE WITHOUT PERMISSION", "2026-09-22"),
+    allday("READING WEEK", "2026-10-10", 7),
+    allday("LAST DAY TO DROP A COURSE WITHOUT RECEIVING A GRADE", "2026-11-10"),
+    allday("FALL CLASSES END ", "2026-12-08"),
+    allday("FALL STUDY DAY", "2026-12-09"),
+    allday("FALL EXAM DAYS", "2026-12-10", 14),
+    allday("WINTER BREAK", "2026-12-24", 11),
+    allday("WINTER CLASSES START", "2027-01-04"),
+    allday("WINTER READING WEEK", "2027-02-13", 7),
+]
+
+
+class FindTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.found = {f.key: f.value for f in term_dates.find(REAL, term_year=2026)}
+
+    def test_finds_every_date(self) -> None:
+        self.assertEqual(
+            self.found,
+            {
+                "semester_start_date": "2026-09-09",
+                "semester_end_date": "2026-12-08",
+                "reading_week_start": "2026-10-10",
+                "reading_week_end": "2026-10-16",
+                "exam_period_start": "2026-12-10",
+                "exam_period_end": "2026-12-23",
+            },
+        )
+
+    def test_all_day_end_dates_are_made_inclusive(self) -> None:
+        """Google's end is exclusive; storing it raw adds a phantom day."""
+        self.assertEqual(self.found["reading_week_end"], "2026-10-16")
+        self.assertEqual(self.found["exam_period_end"], "2026-12-23")
+
+    def test_the_winter_reading_week_is_not_mistaken_for_the_fall_one(self) -> None:
+        self.assertEqual(self.found["reading_week_start"], "2026-10-10")
+
+    def test_trailing_whitespace_in_a_title_still_matches(self) -> None:
+        self.assertEqual(self.found["semester_end_date"], "2026-12-08")
+
+    def test_recurring_events_are_ignored(self) -> None:
+        """A weekly lecture is not an academic date."""
+        lecture = CalendarEvent(
+            "Reading Week Prep", date(2026, 9, 1), date(2026, 9, 2), True, recurring=True
+        )
+        found = {f.key: f.value for f in term_dates.find([lecture], term_year=2026)}
+        self.assertEqual(found, {})
+
+    def test_timed_events_are_ignored(self) -> None:
+        timed = CalendarEvent(
+            "classes start",
+            datetime(2026, 9, 9, 9, 0),
+            datetime(2026, 9, 9, 10, 0),
+            False,
+            recurring=False,
+        )
+        self.assertEqual(term_dates.find([timed], term_year=2026), [])
+
+    def test_an_empty_calendar_finds_nothing(self) -> None:
+        self.assertEqual(term_dates.find([], term_year=2026), [])
+
+    def test_render_says_what_was_missing(self) -> None:
+        partial = term_dates.find([allday("classes start", "2026-09-09")], term_year=2026)
+        text = term_dates.render(partial, partial)
+        self.assertIn("Not found:", text)
+        self.assertIn("exam_period_start", text)
+
+    def test_render_names_the_source_entry(self) -> None:
+        text = term_dates.render(term_dates.find(REAL, term_year=2026), [])
+        self.assertIn('from "FALL EXAM DAYS"', text)
+
+    def test_render_with_nothing_found_explains_what_it_looks_for(self) -> None:
+        self.assertIn("all-day events", term_dates.render([], []))
+
+
+class ApplyTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = database.connect(Path(self._tmp.name) / "t.sqlite3")
+        database.migrate(self.conn)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def test_dates_are_stored(self) -> None:
+        term_dates.apply(self.conn, term_dates.find(REAL, term_year=2026))
+        self.assertEqual(
+            database.get_config(self.conn, "reading_week_end"), "2026-10-16"
+        )
+
+    def test_rerunning_reports_nothing_changed(self) -> None:
+        found = term_dates.find(REAL, term_year=2026)
+        self.assertTrue(term_dates.apply(self.conn, found))
+        self.assertEqual(term_dates.apply(self.conn, found), [], "idempotent")
+
+    def test_the_stored_dates_make_the_syllabus_weeks_correct(self) -> None:
+        """The point of loading them at all."""
+        term_dates.apply(self.conn, term_dates.find(REAL, term_year=2026))
+        syllabus = {
+            1: "2026-09-11", 5: "2026-10-09", 6: "2026-10-23",
+            9: "2026-11-13", 12: "2026-12-04",
+        }
+        for week, day in syllabus.items():
+            with self.subTest(week=week):
+                self.assertEqual(
+                    repo.week_number(self.conn, date.fromisoformat(day)), week
+                )
+
+    def test_reading_week_is_detected_from_the_stored_dates(self) -> None:
+        term_dates.apply(self.conn, term_dates.find(REAL, term_year=2026))
+        self.assertTrue(repo.in_reading_week(self.conn, date(2026, 10, 14)))
+        self.assertFalse(repo.in_reading_week(self.conn, date(2026, 10, 17)))
+
+
+if __name__ == "__main__":
+    unittest.main()
