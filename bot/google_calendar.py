@@ -19,7 +19,11 @@ from zoneinfo import ZoneInfo
 
 from bot.errors import AssistantError, E, logger
 
-SCOPES = ["https://www.googleapis.com/auth/calendar.readonly"]
+# calendar.events.readonly, not calendar.readonly: it grants exactly the
+# events().list call this module makes, and nothing else. It is also the scope
+# registered on the consent screen — an unregistered scope works in testing but
+# counts against verification later.
+SCOPES = ["https://www.googleapis.com/auth/calendar.events.readonly"]
 
 
 @dataclass(frozen=True)
