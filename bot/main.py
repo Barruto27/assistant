@@ -210,9 +210,27 @@ async def job_poll_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             repo.mark_reminder_sent(conn, reminder["id"])
 
 
+def _is_transient(err: BaseException | None) -> bool:
+    """True for connectivity blips the polling loop already retries.
+
+    Telegram returns Bad Gateway and friends routinely; python-telegram-bot's
+    network_retry_loop recovers without help. Escalating those to Kaan means a
+    "something broke" text for every hiccup — and the reply usually fails too,
+    because the network is exactly what's down.
+    """
+    from telegram.error import NetworkError, TimedOut
+
+    return isinstance(err, (NetworkError, TimedOut))
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Single funnel for every failure: log the detail, tell Kaan the code."""
     err = context.error
+
+    if _is_transient(err):
+        logger.warning("[%s] Transient network error: %s", E.TRANSIENT_NETWORK, err)
+        return
+
     if isinstance(err, AssistantError):
         log_error(err)
         user_text = err.user_message()

@@ -50,6 +50,9 @@ class E:
     GMAIL = "E203"
     TELEGRAM_SEND = "E204"
     WEATHER = "E205"
+    # Transient connectivity. Logged, never escalated to Kaan: the polling
+    # loop retries on its own, so a message about it is pure noise.
+    TRANSIENT_NETWORK = "E206"
 
     # E3xx — auth
     TOKEN_EXPIRED = "E301"
