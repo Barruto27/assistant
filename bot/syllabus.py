@@ -120,6 +120,20 @@ EXTRACTION_TOOL: dict[str, Any] = {
                     "required": ["title"],
                 },
             },
+            "uncertainties": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "Anything you could not read confidently, one short line "
+                    "each, naming the specific item: a date given only as a "
+                    "week number, a weight that doesn't add up, a component "
+                    "described in prose you had to interpret, text that was "
+                    "cut off or unreadable. Be honest and specific — this is "
+                    "shown to Kaan so he can check those parts against the "
+                    "document himself. Empty is fine when the syllabus is "
+                    "genuinely unambiguous."
+                ),
+            },
             "weekly_topics": {
                 "type": "array",
                 "description": "The week-by-week schedule of topics, if the syllabus has one.",
@@ -165,6 +179,11 @@ occurrences, skipping reading week and any week with no class. Leave occurrences
 empty when the dates genuinely aren't knowable — a sign-up sheet, or pop
 quizzes.
 
+Say what you are unsure about. You are reading a PDF, not transcribing a
+table, and some things are genuinely ambiguous. Record those in uncertainties
+rather than presenting a guess with the same confidence as a stated fact — Kaan
+checks that list against the document himself.
+
 Today's date is {today}. Use it to resolve any year the syllabus leaves implicit.
 """
 
@@ -191,6 +210,8 @@ class Syllabus:
     course_name: str | None = None
     items: list[SyllabusItem] = field(default_factory=list)
     weekly_topics: list[tuple[int, str]] = field(default_factory=list)
+    #: What the extraction could not read confidently, for Kaan to verify.
+    uncertainties: list[str] = field(default_factory=list)
 
     @property
     def total_weight(self) -> float:
@@ -305,6 +326,11 @@ def parse_extraction(payload: dict[str, Any]) -> Syllabus:
         course_name=_clean(payload.get("course_name")),
         items=items,
         weekly_topics=topics,
+        uncertainties=[
+            str(note).strip()
+            for note in payload.get("uncertainties", [])
+            if str(note).strip()
+        ],
     )
 
 
@@ -374,10 +400,13 @@ def ingest(conn: sqlite3.Connection, syllabus: Syllabus) -> dict[str, int]:
     counts = {"tasks": 0, "topics": 0, "replaced": 0}
     try:
         with transaction(conn):
+            notes = "\n".join(syllabus.uncertainties) or None
             cursor = conn.execute(
-                "INSERT INTO courses (code, name) VALUES (?, ?) "
-                "ON CONFLICT(code) DO UPDATE SET name = COALESCE(excluded.name, name)",
-                (syllabus.course_code, syllabus.course_name),
+                "INSERT INTO courses (code, name, verify_notes) VALUES (?, ?, ?) "
+                "ON CONFLICT(code) DO UPDATE SET "
+                "name = COALESCE(excluded.name, name), "
+                "verify_notes = excluded.verify_notes",
+                (syllabus.course_code, syllabus.course_name, notes),
             )
             row = conn.execute(
                 "SELECT id FROM courses WHERE code = ?", (syllabus.course_code,)
@@ -529,6 +558,13 @@ def receipt(syllabus: Syllabus, counts: dict[str, int]) -> str:
         summary += f". Replaced {counts['replaced']} earlier items from this syllabus"
 
     lines.extend(["", summary])
+
+    if syllabus.uncertainties:
+        # Last, and clearly separated: this is the part worth opening the PDF
+        # for, and it must not read like more extracted content.
+        lines.append("")
+        lines.append("Worth checking against the syllabus yourself:")
+        lines.extend(f"  - {note}" for note in syllabus.uncertainties)
     return "\n".join(lines)
 
 

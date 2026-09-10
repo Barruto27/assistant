@@ -14,8 +14,10 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime
 
-from bot import repository as repo
-from bot.claude_client import Classifier, PromptContext
+from bot import query, repository as repo
+from contextvars import ContextVar
+
+from bot.claude_client import Classifier, PromptContext, Writer
 from bot.errors import AssistantError, E, logger
 from bot.formatting import pct
 from bot.intents import (
@@ -31,6 +33,11 @@ from bot.intents import (
     UPDATE_TASK,
     ParsedIntent,
 )
+
+#: The Writer for the message being handled. Set by handle_message, so every
+#: handler keeps the same (conn, intent, now) signature while the two that need
+#: prose can still reach a client.
+_WRITER: ContextVar[Writer | None] = ContextVar("writer", default=None)
 
 WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 FULL_WEEKDAYS = [
@@ -191,12 +198,10 @@ def _handle_save_note(conn: sqlite3.Connection, intent: ParsedIntent, now: datet
 
 
 def _handle_answer_query(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
-    # TODO(Session 7): answer from assembled context. Until the brief's
-    # context-assembly step exists there is nothing honest to answer with.
-    return (
-        "I can't answer questions about your data yet — that lands with the "
-        "morning brief (Session 7)."
-    )
+    writer = _WRITER.get()
+    if writer is None:
+        return "I can't answer questions right now — no Claude client is configured."
+    return query.answer(conn, intent.get("question", ""), writer, now=now)
 
 
 def _handle_just_chat(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
@@ -251,6 +256,7 @@ def handle_message(
     message: str,
     *,
     now: datetime | None = None,
+    writer: Writer | None = None,
 ) -> str:
     """Classify one message, run its handler, return the reply text.
 
@@ -258,7 +264,12 @@ def handle_message(
     it (``bot.main.on_error`` does, for Telegram).
     """
     moment = now or datetime.now()
-    intent = classifier.classify(message, build_context(conn, moment))
+    token = _WRITER.set(writer)
+    try:
+        intent = classifier.classify(message, build_context(conn, moment))
+    except Exception:
+        _WRITER.reset(token)
+        raise
 
     handler = HANDLERS.get(intent.name)
     if handler is None:
@@ -269,4 +280,7 @@ def handle_message(
         )
 
     logger.info("Intent %s for message %r", intent.name, message)
-    return handler(conn, intent, moment)
+    try:
+        return handler(conn, intent, moment)
+    finally:
+        _WRITER.reset(token)

@@ -125,7 +125,8 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     def work() -> str:
         with _db_lock:
-            return router.handle_message(conn, classifier, text)
+            # The classifier doubles as the Writer; answer_query needs prose.
+            return router.handle_message(conn, classifier, text, writer=classifier)
 
     # Off the event loop: the Anthropic SDK call is synchronous and would
     # otherwise stall every other update while it waits.

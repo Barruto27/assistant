@@ -340,10 +340,15 @@ class RouterTestCase(unittest.TestCase):
         )
         self.assertEqual(reply, question)
 
-    def test_placeholder_intents_are_honest(self) -> None:
-        for name in ("answer_query", "just_chat"):
-            with self.subTest(intent=name):
-                self.assertIn("yet", self.route(ParsedIntent(name=name)))
+    def test_chat_is_still_an_honest_placeholder(self) -> None:
+        self.assertIn("yet", self.route(ParsedIntent(name="just_chat")))
+
+    def test_answer_query_without_a_writer_says_so(self) -> None:
+        """No client configured must not look like "I have no data"."""
+        reply = self.route(
+            ParsedIntent(name="answer_query", fields={"question": "what's due?"})
+        )
+        self.assertIn("can't answer", reply)
 
 
 class ResponseParsingTestCase(unittest.TestCase):
