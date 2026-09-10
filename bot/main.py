@@ -31,6 +31,7 @@ from telegram.ext import (
 from bot import (
     brief,
     email_reader,
+    image_reader,
     google_calendar,
     repository as repo,
     router,
@@ -171,6 +172,65 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return syl.receipt(extracted, counts)
 
     await message.reply_text(await asyncio.to_thread(work))
+
+
+async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read dates out of a screenshot or photo.
+
+    Kaan reached for a screenshot of a schedule unprompted, and it went nowhere:
+    a photo is not a Document and a caption is not TEXT, so no handler matched
+    and the message vanished without a reply or a log line.
+    """
+    message = update.effective_message
+    settings = _settings(context)
+
+    if not settings.anthropic_api_key:
+        await message.reply_text(
+            "I can't read images yet - ANTHROPIC_API_KEY isn't set in .env."
+        )
+        return
+
+    await message.chat.send_action("typing")
+    # Telegram sends several sizes; the last is the largest.
+    photo = message.photo[-1]
+    telegram_file = await photo.get_file()
+    data = bytes(await telegram_file.download_as_bytearray())
+    caption = message.caption or ""
+    conn = _db(context)
+
+    def work() -> str:
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=settings.anthropic_api_key)
+        course, items = image_reader.extract(
+            data, caption, client, settings.claude_model
+        )
+        if items:
+            with _db_lock:
+                image_reader.ingest(conn, course, items)
+        return image_reader.receipt(course, items)
+
+    await message.reply_text(await asyncio.to_thread(work))
+
+
+async def on_unhandled(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Anything from Kaan that no other handler claimed.
+
+    Registered last so nothing he sends can disappear in silence, which is what
+    happened to a captioned screenshot: no handler matched, so there was no
+    reply and nothing in the log to explain it.
+    """
+    message = update.effective_message
+    kinds = [
+        name for name in ("voice", "video", "audio", "sticker", "location", "poll",
+                          "contact", "animation", "video_note")
+        if getattr(message, name, None)
+    ]
+    logger.warning("Unhandled message kind=%s", kinds or "unknown")
+    await message.reply_text(
+        "I got that but don't know how to read it yet. Text, a PDF, or a "
+        "screenshot all work."
+    )
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -452,11 +512,14 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(
         MessageHandler(owner_only & filters.Document.ALL, on_document)
     )
+    app.add_handler(MessageHandler(owner_only & filters.PHOTO, on_photo))
     app.add_handler(
         MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, on_message)
     )
     # Anything from anyone else falls through to here.
     app.add_handler(MessageHandler(~owner_only, on_unknown_user))
+    # Last resort, so nothing Kaan sends is ever dropped without a word.
+    app.add_handler(MessageHandler(owner_only, on_unhandled))
 
     app.add_error_handler(on_error)
     _schedule_jobs(app, conn)

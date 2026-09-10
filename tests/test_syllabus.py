@@ -408,5 +408,55 @@ class RecurringItemTestCase(unittest.TestCase):
         self.assertIn("2026-09-18 to 2026-10-09", text)
 
 
+class CourseCodeTestCase(unittest.TestCase):
+    """Normalising at import is what makes re-import idempotent.
+
+    Renaming a code in the database instead produced five course rows for three
+    courses, 68 tasks, and 500% of the grade: the next extraction returned the
+    original form, matched nothing, and inserted a second full copy.
+    """
+
+    def test_section_letters_are_dropped(self) -> None:
+        self.assertEqual(syl.normalize_course_code("PSYC 3265 A"), "PSYC 3265")
+        self.assertEqual(syl.normalize_course_code("PSYC 3265 Section A"), "PSYC 3265")
+
+    def test_cross_listed_keeps_the_first(self) -> None:
+        self.assertEqual(syl.normalize_course_code("DATT 1200 / PANF 1200"), "DATT 1200")
+
+    def test_faculty_prefix_is_dropped(self) -> None:
+        self.assertEqual(syl.normalize_course_code("FA/DATT 1200"), "DATT 1200")
+        self.assertEqual(syl.normalize_course_code("AP/CMDS 1630 Section A"), "CMDS 1630")
+
+    def test_case_and_spacing_are_normalised(self) -> None:
+        self.assertEqual(syl.normalize_course_code("  psyc  3265  a "), "PSYC 3265")
+
+    def test_plain_codes_are_untouched(self) -> None:
+        self.assertEqual(syl.normalize_course_code("NATS 1505"), "NATS 1505")
+
+    def test_reimport_under_a_variant_replaces_rather_than_duplicates(self) -> None:
+        """The actual regression: same course, differently spelled, twice."""
+        tmp = tempfile.TemporaryDirectory()
+        conn = database.connect(Path(tmp.name) / "t.sqlite3")
+        database.migrate(conn)
+        try:
+            first = {"course_code": "PSYC 3265 A", "course_name": "Memory",
+                     "items": [{"title": "Test 1", "weight_pct": 20}]}
+            second = {"course_code": "PSYC 3265", "course_name": "Memory",
+                      "items": [{"title": "Test 1", "weight_pct": 20}]}
+            syl.ingest(conn, syl.parse_extraction(first))
+            counts = syl.ingest(conn, syl.parse_extraction(second))
+
+            self.assertEqual(counts["replaced"], 1, "the variant must be recognised")
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) AS n FROM courses").fetchone()["n"], 1)
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"], 1)
+            self.assertEqual(
+                conn.execute("SELECT SUM(weight_pct) AS w FROM tasks").fetchone()["w"], 20)
+        finally:
+            conn.close()
+            tmp.cleanup()
+
+
 if __name__ == "__main__":
     unittest.main()

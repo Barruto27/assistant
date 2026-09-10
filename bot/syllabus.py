@@ -199,6 +199,24 @@ TYPE_ALIASES = {
 }
 
 
+#: "PSYC 3265 A", "PSYC 3265 Section A", "FA/DATT 1200" and
+#: "DATT 1200 / PANF 1200" all name the same course to a student. Normalising
+#: at import is what makes re-importing idempotent — renaming a code in the
+#: database afterwards does not, because the next extraction produces the
+#: original form again and inserts a second copy of the whole syllabus.
+_SECTION_RE = re.compile(r"\s+(?:section\s+)?[A-Z]\d?$", re.IGNORECASE)
+_FACULTY_RE = re.compile(r"^[A-Z]{2,3}/", re.IGNORECASE)
+
+
+def normalize_course_code(raw: str) -> str:
+    """Canonical form of a course code, stable across extractions."""
+    code = " ".join(str(raw).split()).upper()
+    # Cross-listed codes ("DATT 1200 / PANF 1200") keep the first listing only.
+    code = code.split("/")[-1].strip() if _FACULTY_RE.match(code) else code.split("/")[0].strip()
+    code = _SECTION_RE.sub("", code).strip()
+    return code
+
+
 def _clean(value: Any) -> Any:
     return None if value in ("", None) else value
 
@@ -219,7 +237,7 @@ def _coerce_type(raw: Any) -> str:
 
 def parse_extraction(payload: dict[str, Any]) -> Syllabus:
     """Turn the tool input into a Syllabus. Shared by the real and fake clients."""
-    code = str(payload.get("course_code", "")).strip()
+    code = normalize_course_code(payload.get("course_code", ""))
     if not code:
         raise AssistantError(
             E.UNPARSEABLE_DOCUMENT,
