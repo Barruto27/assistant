@@ -375,8 +375,8 @@ class RouterTestCase(unittest.TestCase):
         )
         self.assertEqual(reply, question)
 
-    def test_chat_is_still_an_honest_placeholder(self) -> None:
-        self.assertIn("yet", self.route(ParsedIntent(name="just_chat")))
+    def test_chat_without_a_writer_says_so(self) -> None:
+        self.assertIn("can't hold a conversation", self.route(ParsedIntent(name="just_chat")))
 
     def test_answer_query_without_a_writer_says_so(self) -> None:
         """No client configured must not look like "I have no data"."""

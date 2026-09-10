@@ -277,7 +277,15 @@ INTENT_TOOLS: list[dict[str, Any]] = [
             "Conversation with nothing to save and nothing to look up. Venting, "
             "thinking out loud, small talk."
         ),
-        "input_schema": {"type": "object", "properties": {}},
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "message": {
+                    "type": "string",
+                    "description": "What he said, so the reply can respond to it.",
+                }
+            },
+        },
     },
     {
         "name": CHECKIN_REPLY,

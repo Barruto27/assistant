@@ -47,24 +47,65 @@ def course_codes(conn: sqlite3.Connection) -> list[str]:
     return [row["code"] for row in _read(conn, "SELECT code FROM courses ORDER BY code")]
 
 
-def week_number(conn: sqlite3.Connection, when: date | None = None) -> int | None:
-    """Weeks since the configured semester start, 1-indexed. None if unset."""
-    raw = get_config(conn, "semester_start_date")
+def _config_date(conn: sqlite3.Connection, key: str) -> date | None:
+    raw = get_config(conn, key)
     if not raw:
         return None
     try:
-        start = datetime.strptime(raw, "%Y-%m-%d").date()
+        return datetime.strptime(raw, "%Y-%m-%d").date()
     except ValueError as exc:
         raise AssistantError(
-            E.DB_READ,
-            f"semester_start_date is {raw!r}, which isn't a YYYY-MM-DD date.",
-            cause=exc,
+            E.DB_READ, f"{key} is {raw!r}, which isn't a YYYY-MM-DD date.", cause=exc
         ) from exc
+
+
+def reading_week(conn: sqlite3.Connection) -> tuple[date, date] | None:
+    start = _config_date(conn, "reading_week_start")
+    end = _config_date(conn, "reading_week_end")
+    return (start, end) if start and end and end >= start else None
+
+
+def in_reading_week(conn: sqlite3.Connection, when: date | None = None) -> bool:
+    span = reading_week(conn)
+    if not span:
+        return False
+    day = when or date.today()
+    return span[0] <= day <= span[1]
+
+
+def week_number(conn: sqlite3.Connection, when: date | None = None) -> int | None:
+    """Teaching weeks since the semester start, 1-indexed. None if unset.
+
+    Reading week is skipped, because syllabus week numbers do. Counting raw
+    elapsed weeks put every date after the break one week ahead — 7 of the 12
+    weeks in a real course schedule — which would have shown the wrong week and
+    pulled the wrong topic, since course_weeks is joined on this number.
+
+    During the break itself the count holds at the last teaching week; callers
+    that want to say "reading week" ask in_reading_week.
+    """
+    start = _config_date(conn, "semester_start_date")
+    if not start:
+        return None
 
     today = when or date.today()
     if today < start:
         return None
-    return (today - start).days // 7 + 1
+
+    elapsed = (today - start).days
+    span = reading_week(conn)
+    if span:
+        break_start, break_end = span
+        if today > break_end:
+            # Whole teaching weeks removed by the break. A break is described in
+            # calendar days ("Oct 10-17" is eight), but it removes one teaching
+            # week, so round to weeks rather than subtracting the raw span.
+            weeks_off = max(1, round(((break_end - break_start).days + 1) / 7))
+            elapsed -= weeks_off * 7
+        elif today >= break_start:
+            elapsed = (break_start - start).days - 1
+
+    return max(1, elapsed // 7 + 1)
 
 
 # ---------------------------------------------------------------------------

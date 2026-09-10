@@ -207,12 +207,22 @@ message. No preamble, no restating the question.
 """
 
 
+CONVERSATIONAL = """
+He is talking rather than asking a direct question. Reply as a friend would —
+briefly, and to what he actually said. The same rule still holds: anything you
+say about his term comes from the data above or not at all. If he is worried
+about something the data doesn't cover, say you don't have it rather than
+reassuring him with a guess.
+"""
+
+
 def answer(
     conn: sqlite3.Connection,
     question: str,
     writer: Writer,
     *,
     now: datetime | None = None,
+    conversational: bool = False,
 ) -> str:
     """Answer from the database alone."""
     moment = now or datetime.now()
@@ -223,9 +233,10 @@ def answer(
         len(context.tasks),
         len(context.courses),
     )
-    text = writer.compose(
-        SYSTEM.format(voice=VOICE, data=render(context)), question, max_tokens=1000
-    )
+    system = SYSTEM.format(voice=VOICE, data=render(context))
+    if conversational:
+        system += CONVERSATIONAL
+    text = writer.compose(system, question, max_tokens=1000)
     if not text.strip():
         raise AssistantError(
             E.CLAUDE, "I couldn't put an answer together for that.", trigger=question

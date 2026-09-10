@@ -244,9 +244,19 @@ def _handle_answer_query(conn: sqlite3.Connection, intent: ParsedIntent, now: da
 
 
 def _handle_just_chat(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
-    # TODO(Session 10): conversational replies belong with the evening check-in,
-    # which is where a second generation call earns its cost.
-    return "Noted. Conversation isn't wired up yet — I can save and track things."
+    """Reply in conversation, still grounded in what's actually on file.
+
+    Answered through the same query path as a direct question, because most
+    "chat" here is really about his term — "feeling behind", "is this week
+    bad" — and a reply that ignores the data would be worse than the
+    placeholder it replaces. The same rule applies: only what's on file, and
+    say when something isn't.
+    """
+    writer = _WRITER.get()
+    if writer is None:
+        return "I hear you. I can't hold a conversation without a Claude client, though."
+    return query.answer(conn, intent.get("message", "") or "(just talking)", writer,
+                        now=now, conversational=True)
 
 
 def _handle_checkin_reply(

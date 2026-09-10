@@ -70,6 +70,9 @@ class BriefContext:
     #: rest of the time, because a daily count of things he has already decided
     #: not to do is the nagging the backlog rule exists to prevent.
     backlog_count: int | None = None
+    #: True during the mid-term break, when a week number is the wrong
+    #: thing to report.
+    reading_week: bool = False
     #: Weekly/monthly goals with no reported movement. Nudged once, gently.
     stalled_goals: list[sqlite3.Row] = field(default_factory=list)
     #: Yesterday's unclosed daily goal. Exactly one soft mention, ever.
@@ -136,6 +139,7 @@ def assemble(
         (tomorrow.isoformat(), (today + timedelta(days=7)).isoformat()),
     )
 
+    context.reading_week = repo.in_reading_week(conn, today)
     context.stalled_goals = repo.stalled_goals(conn, now)
     context.missed_daily = repo.missed_daily_goals(conn, today)
 
@@ -231,7 +235,9 @@ def render_facts(context: BriefContext) -> str:
     lines: list[str] = [
         f"DATE: {WEEKDAYS[today.weekday()]}, {today:%B} {today.day}, {today.year}",
     ]
-    if context.week_number is not None:
+    if context.reading_week:
+        lines.append("READING WEEK - no classes. Say so instead of a week number.")
+    elif context.week_number is not None:
         lines.append(f"SEMESTER WEEK: {context.week_number}")
 
     def section(title: str, entries: list[str]) -> None:
