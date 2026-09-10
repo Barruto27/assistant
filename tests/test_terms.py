@@ -95,16 +95,25 @@ class FindTestCase(unittest.TestCase):
         partial = term_dates.find(
             [allday("classes start", "2026-09-09")], today=date(2026, 9, 10), term_year=2026
         )
-        text = term_dates.render(partial, partial)
-        self.assertIn("Not found:", text)
-        self.assertIn("exam_period_start", text)
+        text = term_dates.render(partial, partial, today=date(2026, 9, 10))
+        self.assertIn("Couldn't find:", text)
+        self.assertIn("Exams", text)
+
+    def test_render_reads_as_prose_not_config_keys(self) -> None:
+        text = term_dates.render(
+            term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026), [],
+            today=date(2026, 9, 10))
+        self.assertIn("Classes", text)
+        self.assertIn("Reading week", text)
+        self.assertNotIn("semester_start_date", text)
 
     def test_render_names_the_source_entry(self) -> None:
-        text = term_dates.render(term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026), [])
-        self.assertIn('from "FALL EXAM DAYS"', text)
+        text = term_dates.render(term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026), [],
+            today=date(2026, 9, 10))
+        self.assertIn("Dec 10", text)
 
     def test_render_with_nothing_found_explains_what_it_looks_for(self) -> None:
-        self.assertIn("all-day events", term_dates.render([], []))
+        self.assertIn("all-day events", term_dates.render([], [], today=date(2026, 9, 10)))
 
 
 class ApplyTestCase(unittest.TestCase):
@@ -211,6 +220,83 @@ class TwoTermCalendarTestCase(unittest.TestCase):
                 self.assertNotEqual(
                     self.found(day)["semester_start_date"], "2026-01-05"
                 )
+
+
+class DeadlineTestCase(unittest.TestCase):
+    """Enrolment deadlines become priority 1 tasks.
+
+    They are dates rather than work, but missing one has consequences no effort
+    afterwards undoes — which is what priority 1 is for, since the backlog rule
+    exempts it and they stay visible even once past.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = database.connect(Path(self._tmp.name) / "t.sqlite3")
+        database.migrate(self.conn)
+        self.deadlines = term_dates.find_deadlines(
+            REAL, today=date(2026, 9, 10), term_year=2026
+        )
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def test_finds_the_fall_deadlines(self) -> None:
+        found = {d.title: d.due for d in self.deadlines}
+        self.assertEqual(found["Last day to add a course"], "2026-09-22")
+        self.assertEqual(
+            found["Last day to drop a course (no grade)"], "2026-11-10"
+        )
+
+    def test_they_become_priority_one_tasks(self) -> None:
+        term_dates.apply_deadlines(self.conn, self.deadlines)
+        rows = self.conn.execute(
+            "SELECT title, due_date, priority, source FROM tasks ORDER BY due_date"
+        ).fetchall()
+        self.assertTrue(rows)
+        for row in rows:
+            self.assertEqual(row["priority"], 1)
+            self.assertEqual(row["source"], "seed")
+
+    def test_rerunning_does_not_duplicate(self) -> None:
+        term_dates.apply_deadlines(self.conn, self.deadlines)
+        before = self.conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+        self.assertEqual(term_dates.apply_deadlines(self.conn, self.deadlines), [])
+        after = self.conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+        self.assertEqual(before, after)
+
+    def test_a_moved_deadline_updates_in_place(self) -> None:
+        term_dates.apply_deadlines(self.conn, self.deadlines)
+        moved = [
+            term_dates.Deadline(d.title, "2026-11-17", d.source)
+            if "drop" in d.title else d
+            for d in self.deadlines
+        ]
+        changed = term_dates.apply_deadlines(self.conn, moved)
+        self.assertEqual(len(changed), 1)
+        row = self.conn.execute(
+            "SELECT due_date FROM tasks WHERE title LIKE '%drop%'"
+        ).fetchone()
+        self.assertEqual(row["due_date"], "2026-11-17")
+
+    def test_a_passed_deadline_survives_backlog_triage(self) -> None:
+        """Priority 1 is exempt, so a missed drop deadline stays visible."""
+        from bot import backlog
+
+        term_dates.apply_deadlines(self.conn, self.deadlines)
+        self.assertEqual(backlog.demote(self.conn, date(2026, 12, 31)), [])
+
+    def test_render_counts_down_to_each(self) -> None:
+        text = term_dates.render(
+            [], [], self.deadlines, today=date(2026, 9, 10)
+        )
+        self.assertIn("in 12 days", text)
+        self.assertIn("Last day to add a course", text)
+
+    def test_render_says_passed_for_old_ones(self) -> None:
+        text = term_dates.render([], [], self.deadlines, today=date(2026, 12, 31))
+        self.assertIn("passed", text)
 
 
 if __name__ == "__main__":

@@ -71,8 +71,8 @@ def _db(context: ContextTypes.DEFAULT_TYPE) -> sqlite3.Connection:
 
 async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(
-        "Up and running. Text me a task, a reminder, or a goal and I'll save it. "
-        "/status shows what's on file."
+        "Up and running. Text me a task, a reminder, or a goal and I'll save "
+        "it. /help lists everything, /status shows what's on file."
     )
 
 
@@ -312,14 +312,51 @@ def _read_term_dates(app: Application) -> str:
     )
 
     found = term_dates.find(events, today=now.date(), term_year=now.year)
+    deadlines = term_dates.find_deadlines(
+        events, today=now.date(), term_year=now.year
+    )
     with _db_lock:
         changed = term_dates.apply(conn, found)
+        term_dates.apply_deadlines(conn, deadlines)
         week = repo.week_number(conn, now.date())
 
-    text = term_dates.render(found, changed)
-    if week is not None:
-        text += f"\n\nThat puts today in week {week}."
-    return text
+    return term_dates.render(
+        found, changed, deadlines, today=now.date(), week=week
+    )
+
+
+HELP_TEXT = """\
+Text me normally — a task, a reminder, a goal, a question — and I'll work out \
+what you meant. Send a PDF to import a syllabus, or a screenshot to pull dates \
+out of it.
+
+What I do on my own
+  07:30  morning brief
+  21:00  evening check-in, so things get marked done
+  08:15  check my Google token still works, silent unless it doesn't
+  every minute  send any reminder that's come due
+
+Commands
+  /recap     the brief again, rebuilt from current data
+  /backlog   work set aside as overdue and low-stakes
+  /terms     re-read term dates and deadlines from your calendar
+  /status    what's on file and what's working
+  /quiet     silence the morning brief; /quiet evening for the check-in
+  /teston    try things out — /testoff throws it all away
+  /help      this
+
+Things worth knowing
+  I only know what you've told me. Ask about a course I don't have and I'll \
+say so rather than guess.
+  A date I read off a syllabus is flagged if I wasn't sure — worth checking \
+against the document.
+  I never write to your Google Calendar. Read-only.
+"""
+
+
+async def cmd_help(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Everything the bot responds to."""
+    await update.effective_message.reply_text(HELP_TEXT)
 
 
 async def cmd_terms(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -748,6 +785,7 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
     app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
     app.add_handler(CommandHandler("backlog", cmd_backlog, filters=owner_only))
+    app.add_handler(CommandHandler("help", cmd_help, filters=owner_only))
     app.add_handler(CommandHandler("terms", cmd_terms, filters=owner_only))
     app.add_handler(CommandHandler("teston", cmd_teston, filters=owner_only))
     app.add_handler(CommandHandler("testoff", cmd_testoff, filters=owner_only))
