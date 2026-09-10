@@ -21,6 +21,7 @@ from typing import Any
 
 from bot import repository as repo
 from bot.errors import AssistantError, E, logger
+from bot.formatting import pct
 from bot.syllabus import VALID_TYPES, _coerce_type, normalize_course_code
 
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -224,7 +225,7 @@ def receipt(course: str | None, items: list[DatedItem]) -> str:
     for item in sorted(items, key=lambda i: i.due_date):
         bits = [item.due_date, item.title]
         if item.weight_pct is not None:
-            bits.append(f"{item.weight_pct:g}%")
+            bits.append(f"{pct(item.weight_pct)}%")
         if item.tentative:
             bits.append("tentative")
         lines.append("  " + " · ".join(bits))

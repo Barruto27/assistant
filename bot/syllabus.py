@@ -28,6 +28,7 @@ from typing import Any
 
 from bot import repository as repo
 from bot.errors import AssistantError, E, logger
+from bot.formatting import pct
 from db.database import transaction
 
 MAX_PDF_BYTES = 25 * 1024 * 1024
@@ -467,13 +468,13 @@ def receipt(syllabus: Syllabus, counts: dict[str, int]) -> str:
     for item in dated:
         bits = [f"{item.due_date}", item.title]
         if item.weight_pct is not None:
-            bits.append(f"{item.weight_pct:g}%")
+            bits.append(f"{pct(item.weight_pct)}%")
         if item.tentative:
             bits.append("tentative")
         lines.append("  " + " · ".join(bits))
 
     for item in undated:
-        weight = f" · {item.weight_pct:g}%" if item.weight_pct is not None else ""
+        weight = f" · {pct(item.weight_pct)}%" if item.weight_pct is not None else ""
         lines.append(f"  no date · {item.title}{weight}")
 
     for item in syllabus.items:
@@ -481,14 +482,14 @@ def receipt(syllabus: Syllabus, counts: dict[str, int]) -> str:
             span = f"{min(item.occurrences)} to {max(item.occurrences)}"
             lines.append(
                 f"  {len(set(item.occurrences))}x · {item.title} · {span}"
-                + (f" · {item.weight_pct:g}% total" if item.weight_pct else "")
+                + (f" · {pct(item.weight_pct)}% total" if item.weight_pct else "")
             )
 
     total = syllabus.total_weight
     summary = f"{counts['tasks']} items"
     if counts["topics"]:
         summary += f", {counts['topics']} weekly topics"
-    summary += f", {total:g}% of the grade accounted for"
+    summary += f", {pct(total)}% of the grade accounted for"
     if total and abs(total - 100) > 1:
         # Worth surfacing: it usually means something was missed in the PDF.
         summary += " (not 100 — check I didn't miss anything)"

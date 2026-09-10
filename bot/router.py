@@ -17,6 +17,7 @@ from datetime import datetime
 from bot import repository as repo
 from bot.claude_client import Classifier, PromptContext
 from bot.errors import AssistantError, E, logger
+from bot.formatting import pct
 from bot.intents import (
     ADD_REMINDER,
     ADD_TASK,
@@ -101,7 +102,7 @@ def _handle_add_task(conn: sqlite3.Connection, intent: ParsedIntent, now: dateti
     if due := _pretty_date(intent.get("due_date")):
         parts.append(f"due {due}{' (tentative)' if intent.get('tentative') else ''}")
     if (weight := intent.get("weight_pct")) is not None:
-        parts.append(f"{weight:g}%")
+        parts.append(f"{pct(weight)}%")
     parts.append(f"P{priority}")
     if notes := intent.get("notes"):
         parts.append(notes)

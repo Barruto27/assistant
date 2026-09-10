@@ -22,6 +22,7 @@ from pathlib import Path
 from bot import google_calendar, repository as repo, weather
 from bot.claude_client import Writer
 from bot.errors import AssistantError, E, log_error, logger
+from bot.formatting import pct
 from bot.email_reader import FlaggedEmail
 from bot.google_calendar import CalendarEvent
 from bot.voice import VOICE
@@ -163,7 +164,7 @@ def _task_line(row: sqlite3.Row) -> str:
     if row["course"]:
         bits.append(row["course"])
     if row["weight_pct"] is not None:
-        bits.append(f"{row['weight_pct']:g}% of grade")
+        bits.append(f"{pct(row['weight_pct'])}% of grade")
     bits.append(f"priority {row['priority']}")
     if row["due_date"]:
         bits.append(f"due {row['due_date']}")
