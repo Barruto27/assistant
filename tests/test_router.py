@@ -155,6 +155,39 @@ class RouterTestCase(unittest.TestCase):
         row = self.conn.execute("SELECT * FROM reminders").fetchone()
         self.assertEqual(row["sent"], 0)
 
+    def test_anchor_resolves_from_todays_schedule(self) -> None:
+        """The parser once returned the anchor "after Memory class ends at
+        21:00" — naming the answer while refusing to state it. Resolving here
+        means the reminder gets set regardless."""
+        reply = router.handle_message(
+            self.conn,
+            ScriptedClassifier(ParsedIntent(
+                name="add_reminder",
+                fields={"text": "email the TA", "anchor": "after my next class"},
+            )),
+            "remind me after my next class to email the TA",
+            now=NOW,
+            upcoming_events=[("18:00-21:00", "Memory (PSYC 3265)")],
+        )
+        self.assertIn("21:15", reply)
+        self.assertIn("after Memory (PSYC 3265)", reply)
+        row = self.conn.execute("SELECT fire_at FROM reminders").fetchone()
+        self.assertEqual(row["fire_at"], "2026-09-05 21:15:00")
+
+    def test_anchor_uses_the_next_event_not_a_later_one(self) -> None:
+        router.handle_message(
+            self.conn,
+            ScriptedClassifier(ParsedIntent(
+                name="add_reminder",
+                fields={"text": "stretch", "anchor": "after my next class"},
+            )),
+            "x",
+            now=NOW,
+            upcoming_events=[("16:00-17:00", "Lab"), ("18:00-21:00", "Memory")],
+        )
+        row = self.conn.execute("SELECT fire_at FROM reminders").fetchone()
+        self.assertEqual(row["fire_at"], "2026-09-05 17:15:00")
+
     def test_unresolvable_anchor_says_why(self) -> None:
         with self.assertRaises(AssistantError) as ctx:
             self.route(
@@ -166,7 +199,7 @@ class RouterTestCase(unittest.TestCase):
         self.assertEqual(ctx.exception.code, E.MISSING_FIELD)
         # Today's schedule is given to the parser now, so reaching the anchor
         # path means the calendar genuinely didn't settle it.
-        self.assertIn("Nothing on today's calendar", ctx.exception.message)
+        self.assertIn("Nothing left on today's calendar", ctx.exception.message)
 
     def test_reminder_without_a_time_asks(self) -> None:
         with self.assertRaises(AssistantError) as ctx:

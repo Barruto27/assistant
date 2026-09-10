@@ -12,7 +12,7 @@ should cost one API call (principle 1).
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from bot import query, repository as repo
 from contextvars import ContextVar
@@ -38,6 +38,9 @@ from bot.intents import (
 #: handler keeps the same (conn, intent, now) signature while the two that need
 #: prose can still reach a client.
 _WRITER: ContextVar[Writer | None] = ContextVar("writer", default=None)
+#: Today's remaining events, so an unresolved anchor can be settled here
+#: rather than bounced back to Kaan.
+_EVENTS: ContextVar[list] = ContextVar("events", default=[])
 
 WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 FULL_WEEKDAYS = [
@@ -125,17 +128,50 @@ def _handle_add_reminder(conn: sqlite3.Connection, intent: ParsedIntent, now: da
     if not fire_at:
         anchor = intent.get("anchor")
         if anchor:
-            # Today's schedule is given to the parser, so reaching here means
-            # the calendar genuinely doesn't settle it — say which part.
-            raise AssistantError(
-                E.MISSING_FIELD,
-                f"Nothing on today's calendar tells me when {anchor!r} is. "
-                "Give me a time and I'll set it.",
+            resolved = _resolve_anchor(now)
+            if resolved is None:
+                raise AssistantError(
+                    E.MISSING_FIELD,
+                    f"Nothing left on today's calendar tells me when {anchor!r} "
+                    "is. Give me a time and I'll set it.",
+                )
+            fire_at, after_what = resolved
+            repo.add_reminder(conn, text=text, fire_at=fire_at)
+            return (
+                f"Reminder set — {_pretty_time(fire_at)}, after {after_what}: {text}"
             )
         raise AssistantError(E.MISSING_FIELD, "When should I remind you?")
 
     repo.add_reminder(conn, text=text, fire_at=fire_at)
     return f"Reminder set — {_pretty_time(fire_at)}: {text}"
+
+
+def _resolve_anchor(now: datetime) -> tuple[str, str] | None:
+    """Turn "after my next class" into a time, from today's remaining events.
+
+    The parser is given the schedule and asked to compute this itself, but a
+    prompt is guidance and not a guarantee — it once handed back the anchor
+    "after Memory class ends at 21:00", which names the answer while refusing
+    to state it. Resolving here means the reminder gets set either way.
+
+    Fifteen minutes after the event ends: "after my next class" means once he
+    is out, not the instant it finishes.
+    """
+    events = _EVENTS.get()
+    if not events:
+        return None
+
+    span, summary = events[0]
+    end = span.split("-")[-1].strip()
+    try:
+        hour, minute = (int(part) for part in end.split(":", 1))
+    except ValueError:
+        return None
+
+    fire = now.replace(hour=hour, minute=minute, second=0, microsecond=0) + timedelta(
+        minutes=15
+    )
+    return fire.strftime("%Y-%m-%d %H:%M:%S"), summary
 
 
 def _handle_set_gym_split(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
@@ -273,12 +309,14 @@ def handle_message(
     """
     moment = now or datetime.now()
     token = _WRITER.set(writer)
+    events_token = _EVENTS.set(list(upcoming_events or []))
     try:
         intent = classifier.classify(
             message, build_context(conn, moment, upcoming_events=upcoming_events)
         )
     except Exception:
         _WRITER.reset(token)
+        _EVENTS.reset(events_token)
         raise
 
     handler = HANDLERS.get(intent.name)
@@ -294,3 +332,4 @@ def handle_message(
         return handler(conn, intent, moment)
     finally:
         _WRITER.reset(token)
+        _EVENTS.reset(events_token)

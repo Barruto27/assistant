@@ -133,8 +133,12 @@ INTENT_TOOLS: list[dict[str, Any]] = [
                 "anchor": {
                     "type": "string",
                     "description": (
-                        "Only when the time depends on calendar data you were not "
-                        "given, e.g. 'after my next class'. Leave fire_at empty."
+                        "Last resort only. If the system prompt lists today's "
+                        "remaining events and one of them is the event he means, "
+                        "work out fire_at from its end time and leave this empty "
+                        "— naming the event here instead of computing the time "
+                        "just moves the problem. Use this only when no listed "
+                        "event matches, e.g. an event on a later day."
                     ),
                 },
             },
