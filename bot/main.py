@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update
@@ -301,17 +301,17 @@ def _read_term_dates(app: Application) -> str:
         timezone = database.get_config(conn, "timezone", "America/Toronto")
     now = datetime.now(ZoneInfo(timezone))
 
-    # A full academic year either side, since the exam period and the next
-    # term's start both fall outside the current one.
+    # The academic year around today, not the calendar year. Starting at
+    # January 1st swept up the previous winter term and reported week 36.
     events = google_calendar.list_events(
         token,
         settings.google_client_secrets,
-        start=now.replace(month=1, day=1, hour=0, minute=0, second=0, microsecond=0),
-        end=now.replace(year=now.year + 1, month=8, day=31),
+        start=now - timedelta(days=120),
+        end=now + timedelta(days=300),
         max_results=250,
     )
 
-    found = term_dates.find(events, term_year=now.year)
+    found = term_dates.find(events, today=now.date(), term_year=now.year)
     with _db_lock:
         changed = term_dates.apply(conn, found)
         week = repo.week_number(conn, now.date())

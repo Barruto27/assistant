@@ -58,8 +58,28 @@ def _span(event: CalendarEvent) -> tuple[date, date]:
     return start, max(start, end)
 
 
-def find(events: Iterable[CalendarEvent], *, term_year: int | None = None) -> list[Found]:
-    """Match academic dates. Returns only what was actually found."""
+def find(
+    events: Iterable[CalendarEvent],
+    *,
+    today: date | None = None,
+    term_year: int | None = None,
+) -> list[Found]:
+    """Match academic dates for the term ``today`` falls in.
+
+    A calendar holding a full academic year legitimately contains two "classes
+    start" entries, so a match has to be chosen relative to today rather than
+    taken in iteration order. Doing the latter picked the previous January's
+    winter term and reported week 36.
+
+    Term boundaries are anchored differently on purpose:
+
+    *   A ``start`` takes the most recent one that has already happened, since
+        that is the term he is in. Only if none has does it look forward, which
+        is the case in the days before a term begins.
+    *   An ``end`` takes the next one still to come, since a term he is in has
+        not ended yet.
+    """
+    reference = today or date.today()
     candidates = [
         e for e in events
         if e.all_day and not e.recurring and e.summary and e.summary.strip()
@@ -68,16 +88,28 @@ def find(events: Iterable[CalendarEvent], *, term_year: int | None = None) -> li
     found: list[Found] = []
     for key, pattern, which in RULES:
         regex = re.compile(pattern, re.IGNORECASE)
+        matches: list[tuple[date, date, str]] = []
         for event in candidates:
             title = " ".join(event.summary.split())
             if not regex.search(title):
                 continue
             start, end = _span(event)
-            if term_year is not None and start.year not in (term_year, term_year + 1):
+            if term_year is not None and start.year not in (term_year - 1, term_year, term_year + 1):
                 continue
-            value = start if which == "start" else end
-            found.append(Found(key, value.isoformat(), title))
-            break
+            matches.append((start, end, title))
+        if not matches:
+            continue
+
+        if which == "start":
+            past = [m for m in matches if m[0] <= reference]
+            chosen = max(past, key=lambda m: m[0]) if past else min(matches, key=lambda m: m[0])
+            value = chosen[0]
+        else:
+            future = [m for m in matches if m[1] >= reference]
+            chosen = min(future, key=lambda m: m[1]) if future else max(matches, key=lambda m: m[1])
+            value = chosen[1]
+
+        found.append(Found(key, value.isoformat(), chosen[2]))
     return found
 
 

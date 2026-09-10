@@ -41,7 +41,10 @@ REAL = [
 
 class FindTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        self.found = {f.key: f.value for f in term_dates.find(REAL, term_year=2026)}
+        self.found = {
+            f.key: f.value
+            for f in term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026)
+        }
 
     def test_finds_every_date(self) -> None:
         self.assertEqual(
@@ -72,7 +75,7 @@ class FindTestCase(unittest.TestCase):
         lecture = CalendarEvent(
             "Reading Week Prep", date(2026, 9, 1), date(2026, 9, 2), True, recurring=True
         )
-        found = {f.key: f.value for f in term_dates.find([lecture], term_year=2026)}
+        found = {f.key: f.value for f in term_dates.find([lecture], today=date(2026, 9, 10), term_year=2026)}
         self.assertEqual(found, {})
 
     def test_timed_events_are_ignored(self) -> None:
@@ -83,19 +86,21 @@ class FindTestCase(unittest.TestCase):
             False,
             recurring=False,
         )
-        self.assertEqual(term_dates.find([timed], term_year=2026), [])
+        self.assertEqual(term_dates.find([timed], today=date(2026, 9, 10), term_year=2026), [])
 
     def test_an_empty_calendar_finds_nothing(self) -> None:
-        self.assertEqual(term_dates.find([], term_year=2026), [])
+        self.assertEqual(term_dates.find([], today=date(2026, 9, 10), term_year=2026), [])
 
     def test_render_says_what_was_missing(self) -> None:
-        partial = term_dates.find([allday("classes start", "2026-09-09")], term_year=2026)
+        partial = term_dates.find(
+            [allday("classes start", "2026-09-09")], today=date(2026, 9, 10), term_year=2026
+        )
         text = term_dates.render(partial, partial)
         self.assertIn("Not found:", text)
         self.assertIn("exam_period_start", text)
 
     def test_render_names_the_source_entry(self) -> None:
-        text = term_dates.render(term_dates.find(REAL, term_year=2026), [])
+        text = term_dates.render(term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026), [])
         self.assertIn('from "FALL EXAM DAYS"', text)
 
     def test_render_with_nothing_found_explains_what_it_looks_for(self) -> None:
@@ -113,19 +118,23 @@ class ApplyTestCase(unittest.TestCase):
         self._tmp.cleanup()
 
     def test_dates_are_stored(self) -> None:
-        term_dates.apply(self.conn, term_dates.find(REAL, term_year=2026))
+        term_dates.apply(
+            self.conn, term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026)
+        )
         self.assertEqual(
             database.get_config(self.conn, "reading_week_end"), "2026-10-16"
         )
 
     def test_rerunning_reports_nothing_changed(self) -> None:
-        found = term_dates.find(REAL, term_year=2026)
+        found = term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026)
         self.assertTrue(term_dates.apply(self.conn, found))
         self.assertEqual(term_dates.apply(self.conn, found), [], "idempotent")
 
     def test_the_stored_dates_make_the_syllabus_weeks_correct(self) -> None:
         """The point of loading them at all."""
-        term_dates.apply(self.conn, term_dates.find(REAL, term_year=2026))
+        term_dates.apply(
+            self.conn, term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026)
+        )
         syllabus = {
             1: "2026-09-11", 5: "2026-10-09", 6: "2026-10-23",
             9: "2026-11-13", 12: "2026-12-04",
@@ -137,9 +146,71 @@ class ApplyTestCase(unittest.TestCase):
                 )
 
     def test_reading_week_is_detected_from_the_stored_dates(self) -> None:
-        term_dates.apply(self.conn, term_dates.find(REAL, term_year=2026))
+        term_dates.apply(
+            self.conn, term_dates.find(REAL, today=date(2026, 9, 10), term_year=2026)
+        )
         self.assertTrue(repo.in_reading_week(self.conn, date(2026, 10, 14)))
         self.assertFalse(repo.in_reading_week(self.conn, date(2026, 10, 17)))
+
+
+class TwoTermCalendarTestCase(unittest.TestCase):
+    """A full academic year holds two "classes start" entries.
+
+    Run against the live calendar, taking the first match in iteration order
+    picked the previous January's winter term and reported today as week 36.
+    """
+
+    CALENDAR = [
+        allday("WINTER CLASSES START", "2026-01-05"),
+        allday("WINTER READING WEEK", "2026-02-14", 7),
+        allday("WINTER CLASSES END", "2026-04-06"),
+        allday("classes start", "2026-09-09"),
+        allday("READING WEEK", "2026-10-10", 7),
+        allday("FALL CLASSES END ", "2026-12-08"),
+        allday("FALL EXAM DAYS", "2026-12-10", 14),
+        allday("WINTER CLASSES START", "2027-01-04"),
+        allday("WINTER READING WEEK", "2027-02-13", 7),
+    ]
+
+    def found(self, today: str) -> dict[str, str]:
+        return {
+            f.key: f.value
+            for f in term_dates.find(
+                self.CALENDAR, today=date.fromisoformat(today), term_year=2026
+            )
+        }
+
+    def test_mid_fall_picks_the_fall_term(self) -> None:
+        found = self.found("2026-09-10")
+        self.assertEqual(found["semester_start_date"], "2026-09-09")
+        self.assertEqual(found["semester_end_date"], "2026-12-08")
+        self.assertEqual(found["reading_week_start"], "2026-10-10")
+
+    def test_a_start_takes_the_most_recent_one_already_passed(self) -> None:
+        """Not the earliest in the file, and not next January's."""
+        self.assertEqual(
+            self.found("2026-11-20")["semester_start_date"], "2026-09-09"
+        )
+
+    def test_an_end_takes_the_next_one_still_to_come(self) -> None:
+        self.assertEqual(self.found("2026-09-10")["semester_end_date"], "2026-12-08")
+
+    def test_after_the_fall_term_it_moves_on(self) -> None:
+        """In January the winter term is the current one."""
+        self.assertEqual(
+            self.found("2027-01-10")["semester_start_date"], "2027-01-04"
+        )
+
+    def test_before_any_term_starts_it_looks_forward(self) -> None:
+        found = self.found("2025-12-20")
+        self.assertEqual(found["semester_start_date"], "2026-01-05")
+
+    def test_the_january_entry_never_wins_during_the_fall(self) -> None:
+        for day in ("2026-09-09", "2026-10-14", "2026-12-01"):
+            with self.subTest(day=day):
+                self.assertNotEqual(
+                    self.found(day)["semester_start_date"], "2026-01-05"
+                )
 
 
 if __name__ == "__main__":
