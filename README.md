@@ -4,8 +4,8 @@ A Claude-powered Telegram bot for school and life planning. See
 [telegram-assistant-plan.md](telegram-assistant-plan.md) for the full build plan
 — each numbered section there is one working session.
 
-**Current state:** Sessions 1, 2, 4, 6 (calendar half) and 7 built. Sessions 3,
-5, and 8–11 not started.
+**Current state:** Sessions 1, 2, 4, 5, 6 (calendar half) and 7 built. Live on
+the home server. Sessions 3 and 8–11 not started.
 
 Text the bot and it saves what you said:
 
@@ -149,7 +149,28 @@ Defined in [bot/errors.py](bot/errors.py).
 | `/recap` | Regenerates the morning brief now, from current data |
 | `/quiet` | Toggles the scheduled morning brief off and on |
 
+Send the bot a **PDF** and it imports it as a syllabus.
+
 Any other text goes through the classify -> handle -> receipt pipeline.
+
+## Syllabus import
+
+Send the PDF to the bot, or from the command line:
+
+```bash
+python -m scripts.import_syllabus path/to/syllabus.pdf --dry-run
+```
+
+`--dry-run` extracts and prints without writing — the right way to check an
+extraction against the real document before trusting it.
+
+Re-importing the same course **replaces** its syllabus-sourced tasks rather
+than duplicating them, and leaves anything added by text alone: a re-import
+must not quietly undo your own edits.
+
+The receipt lists every item with its date and weight, and says what fraction
+of the grade is accounted for. A total that isn't 100% usually means something
+was missed in the PDF, so it says so.
 
 ## Scheduled jobs
 

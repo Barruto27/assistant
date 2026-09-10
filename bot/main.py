@@ -28,7 +28,7 @@ from telegram.ext import (
     filters,
 )
 
-from bot import brief, repository as repo, router
+from bot import brief, repository as repo, router, syllabus as syl
 from bot.claude_client import AnthropicClient
 from bot.config import ConfigError, Settings, load_settings
 from bot.errors import AssistantError, E, log_error, logger, setup_logging
@@ -123,6 +123,47 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     # otherwise stall every other update while it waits.
     reply = await asyncio.to_thread(work)
     await update.effective_message.reply_text(reply)
+
+
+async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Accept a syllabus PDF and import it (plan Section 5).
+
+    Follows the receipt pattern rather than a confirmation gate: the import
+    happens, and the reply lists what landed so a bad extraction is obvious.
+    """
+    message = update.effective_message
+    document = message.document
+    settings = _settings(context)
+
+    name = (document.file_name or "").lower()
+    if not name.endswith(".pdf") and document.mime_type != "application/pdf":
+        await message.reply_text(
+            "I can only read PDFs right now. Export it and send it again."
+        )
+        return
+
+    if not settings.anthropic_api_key:
+        await message.reply_text(
+            "I can't read documents yet - ANTHROPIC_API_KEY isn't set in .env."
+        )
+        return
+
+    await message.chat.send_action("typing")
+    telegram_file = await document.get_file()
+    pdf_bytes = bytes(await telegram_file.download_as_bytearray())
+
+    conn = _db(context)
+
+    def work() -> str:
+        from anthropic import Anthropic
+
+        client = Anthropic(api_key=settings.anthropic_api_key)
+        extracted = syl.extract(pdf_bytes, client, settings.claude_model)
+        with _db_lock:
+            counts = syl.ingest(conn, extracted)
+        return syl.receipt(extracted, counts)
+
+    await message.reply_text(await asyncio.to_thread(work))
 
 
 async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -306,6 +347,9 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(CommandHandler("status", cmd_status, filters=owner_only))
     app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
     app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
+    app.add_handler(
+        MessageHandler(owner_only & filters.Document.ALL, on_document)
+    )
     app.add_handler(
         MessageHandler(owner_only & filters.TEXT & ~filters.COMMAND, on_message)
     )
