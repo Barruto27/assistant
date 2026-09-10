@@ -101,6 +101,17 @@ EXTRACTION_TOOL: dict[str, Any] = {
                                 "cannot be determined."
                             ),
                         },
+                        "attendance": {
+                            "type": "boolean",
+                            "description": (
+                                "True when the mark is for being physically "
+                                "present rather than for submitting anything: "
+                                "iClicker or clicker questions, in-class "
+                                "participation, attendance. False for anything "
+                                "with an artifact to hand in, including "
+                                "reflections and check-ins posted online."
+                            ),
+                        },
                         "notes": {
                             "type": "string",
                             "description": "Chapters, topics, or format worth keeping. Keep it short.",
@@ -128,6 +139,12 @@ EXTRACTION_TOOL: dict[str, Any] = {
 
 SYSTEM = """\
 You are reading a course syllabus and recording what it commits the student to.
+
+Distinguish work from attendance. A mark for showing up — iClicker questions,
+in-class participation — has nothing to hand in, and reminding someone it is
+"due" helps nobody. Flag those with attendance so they can be framed as a
+reason to go rather than a deadline. Anything with an artifact, including a
+reflection posted online, is ordinary work.
 
 Call record_syllabus exactly once. Work only from the document — never invent an
 item, a date, or a weight that isn't there.
@@ -161,6 +178,9 @@ class SyllabusItem:
     weight_pct: float | None = None
     week_number: int | None = None
     notes: str | None = None
+    #: Marked for showing up, with nothing to submit. Surfaced as a nudge to
+    #: attend rather than as a deadline.
+    attendance: bool = False
     #: Explicit dates for a repeating item, one task row per date.
     occurrences: list[str] = field(default_factory=list)
 
@@ -207,6 +227,10 @@ TYPE_ALIASES = {
 #: original form again and inserts a second copy of the whole syllabus.
 _SECTION_RE = re.compile(r"\s+(?:section\s+)?[A-Z]\d?$", re.IGNORECASE)
 _FACULTY_RE = re.compile(r"^[A-Z]{2,3}/", re.IGNORECASE)
+_RUNTOGETHER_RE = re.compile(r"([A-Z]{2,})\s*(\d{3,4})")
+# A section letter stuck to the number ("3265A"). Requires a preceding digit
+# so it can never eat the last letter of a bare department code.
+_GLUED_SECTION_RE = re.compile(r"(?<=\d)[A-Z]\d?$")
 
 
 def normalize_course_code(raw: str) -> str:
@@ -214,8 +238,13 @@ def normalize_course_code(raw: str) -> str:
     code = " ".join(str(raw).split()).upper()
     # Cross-listed codes ("DATT 1200 / PANF 1200") keep the first listing only.
     code = code.split("/")[-1].strip() if _FACULTY_RE.match(code) else code.split("/")[0].strip()
+    # Split letters from digits first: "CMDS1630" from a chat caption must land
+    # on the same course as the syllabus's "CMDS 1630", and "PSYC3265A" only
+    # reveals its section letter once the number is separated out.
+    code = _RUNTOGETHER_RE.sub(lambda m: f"{m.group(1)} {m.group(2)}", code)
     code = _SECTION_RE.sub("", code).strip()
-    return code
+    code = _GLUED_SECTION_RE.sub("", code).strip()
+    return " ".join(code.split())
 
 
 def _clean(value: Any) -> Any:
@@ -254,6 +283,7 @@ def parse_extraction(payload: dict[str, Any]) -> Syllabus:
             weight_pct=_clean(raw.get("weight_pct")),
             week_number=_clean(raw.get("week_number")),
             notes=_clean(raw.get("notes")),
+            attendance=bool(raw.get("attendance", False)),
             occurrences=[
                 str(d).strip()
                 for d in (raw.get("occurrences") or [])
@@ -369,8 +399,9 @@ def ingest(conn: sqlite3.Connection, syllabus: Syllabus) -> dict[str, int]:
                 for row in expand(item):
                     conn.execute(
                         "INSERT INTO tasks (title, type, course, due_date, tentative, "
-                        "weight_pct, priority, notes, week_number, source) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'syllabus')",
+                        "weight_pct, priority, notes, week_number, source, "
+                        "attendance) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'syllabus', ?)",
                         (
                             row.title,
                             row.type,
@@ -381,6 +412,7 @@ def ingest(conn: sqlite3.Connection, syllabus: Syllabus) -> dict[str, int]:
                             default_priority(row),
                             row.notes,
                             row.week_number,
+                            int(row.attendance),
                         ),
                     )
                     counts["tasks"] += 1

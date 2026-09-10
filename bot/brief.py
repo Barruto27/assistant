@@ -59,6 +59,9 @@ class BriefContext:
     overdue_urgent: list[sqlite3.Row] = field(default_factory=list)
     upcoming: list[sqlite3.Row] = field(default_factory=list)
     reminders: list[sqlite3.Row] = field(default_factory=list)
+    #: Marks for turning up today. Never a deadline — there is nothing to hand
+    #: in, so the useful thing to say is that going is worth marks.
+    attendance_today: list[sqlite3.Row] = field(default_factory=list)
     week_topics: list[tuple[str, str]] = field(default_factory=list)
     #: Email findings. Surfaced only — Section 6 is explicit that nothing is
     #: written to tasks until Kaan confirms.
@@ -107,14 +110,21 @@ def assemble(
     context.goals = repo.active_goals(conn)
     context.gym_split = repo.gym_split_for(conn, today.weekday())
 
-    context.due_today = _tasks(conn, "due_date = ?", (today.isoformat(),))
-    context.due_tomorrow = _tasks(conn, "due_date = ?", (tomorrow.isoformat(),))
+    context.due_today = _tasks(
+        conn, "due_date = ? AND attendance = 0", (today.isoformat(),)
+    )
+    context.attendance_today = _tasks(
+        conn, "due_date = ? AND attendance = 1", (today.isoformat(),)
+    )
+    context.due_tomorrow = _tasks(
+        conn, "due_date = ? AND attendance = 0", (tomorrow.isoformat(),)
+    )
     context.overdue_urgent = _tasks(
-        conn, "due_date < ? AND priority = 1", (today.isoformat(),)
+        conn, "due_date < ? AND priority = 1 AND attendance = 0", (today.isoformat(),)
     )
     context.upcoming = _tasks(
         conn,
-        "due_date > ? AND due_date <= ?",
+        "attendance = 0 AND due_date > ? AND due_date <= ?",
         (tomorrow.isoformat(), (today + timedelta(days=7)).isoformat()),
     )
 
@@ -225,6 +235,14 @@ def render_facts(context: BriefContext) -> str:
         lines.append(f"WEATHER: {context.forecast.summary()}")
 
     section("OVERDUE AND STILL HIGH PRIORITY", [_task_line(r) for r in context.overdue_urgent])
+    section(
+        "MARKS FOR TURNING UP TODAY (nothing to submit - only counts if he goes)",
+        [
+            f"{row['title']} | {row['course']} | {pct(row['weight_pct'])}% of grade"
+            + (f" | {row['notes']}" if row["notes"] else "")
+            for row in context.attendance_today
+        ],
+    )
     section("DUE TODAY", [_task_line(r) for r in context.due_today])
     section("DUE TOMORROW", [_task_line(r) for r in context.due_tomorrow])
     section("DUE WITHIN A WEEK", [_task_line(r) for r in context.upcoming])
@@ -286,7 +304,9 @@ Then, in this order, skipping anything with no facts:
 2. Goals
 3. Weather
 4. Anything overdue and still high priority
-5. What's on today (calendar, then what's due today)
+5. What's on today (calendar, then what's due today). If a lecture carries a
+   mark just for being there, say so as a reason to go — briefly, once, without
+   moralising. Never call it "due"; there is nothing to hand in.
 6. Today's gym split
 7. Carried-over reminders
 8. The rest of the week: non-lecture events, upcoming deadlines, course topics

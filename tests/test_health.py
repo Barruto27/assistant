@@ -68,8 +68,9 @@ class TokenAlertConfigTestCase(unittest.TestCase):
         self.conn.close()
         self._tmp.cleanup()
 
-    def test_migration_0002_applied(self) -> None:
-        self.assertEqual(database.current_version(self.conn), 2)
+    def test_migrations_applied(self) -> None:
+        latest = max(n for n, _ in database._discover_migrations())
+        self.assertEqual(database.current_version(self.conn), latest)
 
     def test_check_time_default(self) -> None:
         self.assertEqual(database.get_config(self.conn, "token_check_time"), "08:15")
