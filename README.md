@@ -90,12 +90,39 @@ python -m unittest discover -s tests
 
 ## Deployment
 
-`deploy/assistant.service` is a systemd unit with restart-on-crash and
-start-on-boot. Edit `User` and `WorkingDirectory`, then:
+Live on the home server (Ubuntu 24.04) as a dedicated `assistant` account with
+no sudo, under **user-level systemd** — so nothing about the running bot needs
+root.
 
 ```bash
-sudo cp deploy/assistant.service /etc/systemd/system/ && sudo systemctl enable --now assistant
+mkdir -p ~/.config/systemd/user
+cp ~/assistant/deploy/assistant-user.service ~/.config/systemd/user/assistant.service
+systemctl --user daemon-reload
+systemctl --user enable --now assistant
 ```
+
+The one step that does need root, once, is letting that account's services run
+with nobody logged in:
+
+```bash
+sudo loginctl enable-linger assistant
+```
+
+Without linger the bot only runs while someone is logged in as `assistant`,
+which is never — it would look installed and simply never fire.
+
+`deploy/assistant.service` remains for a system-wide install instead.
+
+Watching it:
+
+```bash
+systemctl --user status assistant
+journalctl --user -u assistant -f
+```
+
+**Only one instance may poll a given bot token.** Two copies fight over
+incoming updates and behave erratically, so stop any local copy before starting
+the server one.
 
 ## Error codes
 

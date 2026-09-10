@@ -15,6 +15,10 @@
 Description=Personal Telegram Assistant
 After=network-online.target
 Wants=network-online.target
+# These belong in [Unit], not [Service]: systemd moved them in v230 and
+# silently ignores them in the wrong section.
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -25,8 +29,6 @@ ExecStart=/home/kaan/assistant/.venv/bin/python -m bot.main
 # Restart on crash, but back off so a config error doesn't spin the CPU.
 Restart=always
 RestartSec=10
-StartLimitIntervalSec=300
-StartLimitBurst=5
 
 # Unbuffered so journalctl shows output as it happens.
 Environment=PYTHONUNBUFFERED=1

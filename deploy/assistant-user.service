@@ -1,0 +1,41 @@
+# User-level systemd unit for the personal Telegram assistant.
+#
+# Runs as a dedicated unprivileged account with no sudo, so installing it needs
+# no root at all. The one thing that does need root is enabling linger for that
+# account, which is what lets the service run at boot with nobody logged in:
+#
+#   sudo loginctl enable-linger assistant
+#
+# Install (as the assistant user):
+#   mkdir -p ~/.config/systemd/user
+#   cp ~/assistant/deploy/assistant-user.service ~/.config/systemd/user/assistant.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now assistant
+#
+# Watch it:
+#   systemctl --user status assistant
+#   journalctl --user -u assistant -f
+
+[Unit]
+Description=Personal Telegram Assistant
+# Rate-limit restarts so a bad config can't spin the CPU. These belong in
+# [Unit], not [Service] — systemd moved them in v230 and silently ignores them
+# in the wrong section.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+WorkingDirectory=/home/assistant/assistant
+ExecStart=/home/assistant/assistant/.venv/bin/python -m bot.main
+
+# Come back from a crash, and from a network outage at boot.
+Restart=always
+RestartSec=10
+
+# Unbuffered so journalctl shows output as it happens.
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+# default.target is the user-session equivalent of multi-user.target.
+WantedBy=default.target
