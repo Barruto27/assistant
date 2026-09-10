@@ -19,8 +19,9 @@ testable without one.
 from __future__ import annotations
 
 import base64
+import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,8 @@ from bot.errors import AssistantError, E, logger
 from db.database import transaction
 
 MAX_PDF_BYTES = 25 * 1024 * 1024
+
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 EXTRACTION_TOOL: dict[str, Any] = {
     "name": "record_syllabus",
@@ -84,6 +87,19 @@ EXTRACTION_TOOL: dict[str, Any] = {
                             "type": "integer",
                             "description": "Course week it falls in, if the syllabus says.",
                         },
+                        "occurrences": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "For anything recurring — weekly check-ins, "
+                                "participation, quizzes with known dates — the "
+                                "actual due date of each instance as YYYY-MM-DD, "
+                                "read off the weekly schedule. Skip reading week "
+                                "and any week with no class. Leave empty for "
+                                "one-off items, or when the dates genuinely "
+                                "cannot be determined."
+                            ),
+                        },
                         "notes": {
                             "type": "string",
                             "description": "Chapters, topics, or format worth keeping. Keep it short.",
@@ -124,6 +140,13 @@ Mark tentative generously. Syllabi hedge constantly, and a date recorded as
 firm when the syllabus called it approximate is worse than one flagged as
 provisional.
 
+Recurring work matters as much as the big deadlines. Something due "every week
+before class" is easy to lose track of precisely because it is routine. When an
+item repeats and the schedule lets you work out the dates, list every one in
+occurrences, skipping reading week and any week with no class. Leave occurrences
+empty when the dates genuinely aren't knowable — a sign-up sheet, or pop
+quizzes.
+
 Today's date is {today}. Use it to resolve any year the syllabus leaves implicit.
 """
 
@@ -137,6 +160,8 @@ class SyllabusItem:
     weight_pct: float | None = None
     week_number: int | None = None
     notes: str | None = None
+    #: Explicit dates for a repeating item, one task row per date.
+    occurrences: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -210,6 +235,11 @@ def parse_extraction(payload: dict[str, Any]) -> Syllabus:
             weight_pct=_clean(raw.get("weight_pct")),
             week_number=_clean(raw.get("week_number")),
             notes=_clean(raw.get("notes")),
+            occurrences=[
+                str(d).strip()
+                for d in (raw.get("occurrences") or [])
+                if _DATE_RE.match(str(d).strip())
+            ],
         )
         for raw in payload.get("items", [])
         if str(raw.get("title", "")).strip()
@@ -317,23 +347,24 @@ def ingest(conn: sqlite3.Connection, syllabus: Syllabus) -> dict[str, int]:
                 counts["replaced"] = existing
 
             for item in syllabus.items:
-                conn.execute(
-                    "INSERT INTO tasks (title, type, course, due_date, tentative, "
-                    "weight_pct, priority, notes, week_number, source) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'syllabus')",
-                    (
-                        item.title,
-                        item.type,
-                        syllabus.course_code,
-                        item.due_date,
-                        int(item.tentative),
-                        item.weight_pct,
-                        default_priority(item),
-                        item.notes,
-                        item.week_number,
-                    ),
-                )
-                counts["tasks"] += 1
+                for row in expand(item):
+                    conn.execute(
+                        "INSERT INTO tasks (title, type, course, due_date, tentative, "
+                        "weight_pct, priority, notes, week_number, source) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'syllabus')",
+                        (
+                            row.title,
+                            row.type,
+                            syllabus.course_code,
+                            row.due_date,
+                            int(row.tentative),
+                            row.weight_pct,
+                            default_priority(row),
+                            row.notes,
+                            row.week_number,
+                        ),
+                    )
+                    counts["tasks"] += 1
 
             for week, topic in syllabus.weekly_topics:
                 conn.execute(
@@ -358,6 +389,37 @@ def ingest(conn: sqlite3.Connection, syllabus: Syllabus) -> dict[str, int]:
     return counts
 
 
+def expand(item: SyllabusItem) -> list[SyllabusItem]:
+    """One row per occurrence for repeating work, else the item unchanged.
+
+    Recurring work is what quietly slips: a weekly check-in has no single due
+    date, so with one row it never lands in "what's due today" and the brief
+    never mentions it — which is exactly backwards, since routine work is the
+    easiest to forget.
+
+    The stated weight is the total for the whole term, so it is divided across
+    instances. Otherwise a 5% participation mark would read as 5% twelve times
+    over and the receipt's grade total would be nonsense.
+    """
+    if not item.occurrences:
+        return [item]
+
+    dates = sorted(set(item.occurrences))
+    share = (item.weight_pct / len(dates)) if item.weight_pct else item.weight_pct
+    total = len(dates)
+
+    return [
+        replace(
+            item,
+            title=f"{item.title} ({index}/{total})",
+            due_date=due,
+            weight_pct=share,
+            occurrences=[],
+        )
+        for index, due in enumerate(dates, start=1)
+    ]
+
+
 def default_priority(item: SyllabusItem) -> int:
     """Priority by stakes, matching what the message pipeline does.
 
@@ -379,9 +441,10 @@ def receipt(syllabus: Syllabus, counts: dict[str, int]) -> str:
 
     lines = [f"{header}", ""]
     dated = sorted(
-        (i for i in syllabus.items if i.due_date), key=lambda i: i.due_date or ""
+        (i for i in syllabus.items if i.due_date and not i.occurrences),
+        key=lambda i: i.due_date or "",
     )
-    undated = [i for i in syllabus.items if not i.due_date]
+    undated = [i for i in syllabus.items if not i.due_date and not i.occurrences]
 
     for item in dated:
         bits = [f"{item.due_date}", item.title]
@@ -394,6 +457,14 @@ def receipt(syllabus: Syllabus, counts: dict[str, int]) -> str:
     for item in undated:
         weight = f" · {item.weight_pct:g}%" if item.weight_pct is not None else ""
         lines.append(f"  no date · {item.title}{weight}")
+
+    for item in syllabus.items:
+        if item.occurrences:
+            span = f"{min(item.occurrences)} to {max(item.occurrences)}"
+            lines.append(
+                f"  {len(set(item.occurrences))}x · {item.title} · {span}"
+                + (f" · {item.weight_pct:g}% total" if item.weight_pct else "")
+            )
 
     total = syllabus.total_weight
     summary = f"{counts['tasks']} items"

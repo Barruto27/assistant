@@ -321,5 +321,92 @@ class TypeCoercionTestCase(unittest.TestCase):
             tmp.cleanup()
 
 
+class RecurringItemTestCase(unittest.TestCase):
+    """Weekly work must land on each of its dates.
+
+    A CMDS syllabus had five undated items including "Weekly Check-Ins, due
+    every week before class". With a single dateless row it would never appear
+    in "what's due today" — routine work being exactly what slips.
+    """
+
+    DATES = ["2026-09-18", "2026-09-25", "2026-10-02", "2026-10-09"]
+
+    def item(self, **kw):
+        base = dict(title="Weekly Check-Ins", weight_pct=5.0, occurrences=list(self.DATES))
+        base.update(kw)
+        return syl.SyllabusItem(**base)
+
+    def test_one_row_per_date(self) -> None:
+        rows = syl.expand(self.item())
+        self.assertEqual(len(rows), 4)
+        self.assertEqual([r.due_date for r in rows], self.DATES)
+
+    def test_titles_are_numbered(self) -> None:
+        rows = syl.expand(self.item())
+        self.assertEqual(rows[0].title, "Weekly Check-Ins (1/4)")
+        self.assertEqual(rows[-1].title, "Weekly Check-Ins (4/4)")
+
+    def test_weight_is_divided_not_repeated(self) -> None:
+        rows = syl.expand(self.item())
+        self.assertAlmostEqual(sum(r.weight_pct for r in rows), 5.0)
+        self.assertAlmostEqual(rows[0].weight_pct, 1.25)
+
+    def test_duplicate_dates_are_collapsed(self) -> None:
+        rows = syl.expand(self.item(occurrences=["2026-09-18", "2026-09-18", "2026-09-25"]))
+        self.assertEqual(len(rows), 2)
+
+    def test_item_without_weight_survives(self) -> None:
+        rows = syl.expand(self.item(weight_pct=None))
+        self.assertEqual(len(rows), 4)
+        self.assertIsNone(rows[0].weight_pct)
+
+    def test_non_recurring_items_pass_through_untouched(self) -> None:
+        one_off = syl.SyllabusItem(title="Final Essay", due_date="2026-12-08", weight_pct=35)
+        self.assertEqual(syl.expand(one_off), [one_off])
+
+    def test_malformed_dates_are_discarded_at_parse(self) -> None:
+        parsed = syl.parse_extraction({
+            "course_code": "X 100",
+            "items": [{"title": "Weekly", "occurrences": ["2026-09-18", "next Tuesday", ""]}],
+        })
+        self.assertEqual(parsed.items[0].occurrences, ["2026-09-18"])
+
+    def test_ingest_writes_every_occurrence(self) -> None:
+        tmp = tempfile.TemporaryDirectory()
+        conn = database.connect(Path(tmp.name) / "t.sqlite3")
+        database.migrate(conn)
+        try:
+            payload = {
+                "course_code": "CMDS 1630",
+                "items": [
+                    {"title": "Weekly Check-Ins", "weight_pct": 5, "occurrences": self.DATES},
+                    {"title": "Final Essay", "due_date": "2026-12-08", "weight_pct": 35},
+                ],
+            }
+            parsed = syl.parse_extraction(payload)
+            counts = syl.ingest(conn, parsed)
+            self.assertEqual(counts["tasks"], 5)
+
+            due = conn.execute(
+                "SELECT title FROM tasks WHERE due_date = '2026-09-25'"
+            ).fetchall()
+            self.assertEqual(len(due), 1, "a check-in must be due on its own date")
+
+            total = conn.execute("SELECT SUM(weight_pct) AS w FROM tasks").fetchone()["w"]
+            self.assertAlmostEqual(total, 40.0, msg="weights must not be multiplied")
+        finally:
+            conn.close()
+            tmp.cleanup()
+
+    def test_receipt_summarises_the_series(self) -> None:
+        parsed = syl.parse_extraction({
+            "course_code": "CMDS 1630",
+            "items": [{"title": "Weekly Check-Ins", "weight_pct": 5, "occurrences": self.DATES}],
+        })
+        text = syl.receipt(parsed, {"tasks": 4, "topics": 0, "replaced": 0})
+        self.assertIn("4x · Weekly Check-Ins", text)
+        self.assertIn("2026-09-18 to 2026-10-09", text)
+
+
 if __name__ == "__main__":
     unittest.main()

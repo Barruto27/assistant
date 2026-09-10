@@ -104,6 +104,26 @@ def _strip_html(html: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"(?s)<[^>]+>", " ", without_blocks))
 
 
+def _search_criteria(pattern: str) -> tuple[str, ...]:
+    """Turn an allowlist pattern into IMAP search terms.
+
+    Three forms, because matching only on sender misses the mail that matters
+    most. Anything forwarded from the university address is university mail by
+    definition, whoever actually sent it — a professor through eClass, a
+    mailing list, the registrar. Gmail stamps X-Forwarded-For on every forward,
+    so that header is a far better filter than guessing at sender domains.
+
+        fwd:kaanoz@my.yorku.ca   -> forwarded from that address
+        to:my.yorku.ca           -> addressed to that address
+        yorku.ca                 -> from that sender (the default)
+    """
+    if pattern.startswith("fwd:"):
+        return ("HEADER", "X-Forwarded-For", pattern[4:])
+    if pattern.startswith("to:"):
+        return ("TO", f'"{pattern[3:]}"')
+    return ("FROM", f'"{pattern}"')
+
+
 def known_senders(conn) -> list[tuple[str, str | None]]:
     """Active allowlist entries as (pattern, course_label)."""
     rows = conn.execute(
@@ -151,9 +171,10 @@ def fetch(
 
         found: dict[bytes, str | None] = {}
         for pattern, course_label in senders:
-            status, data = client.search(None, "SINCE", window, "FROM", f'"{pattern}"')
+            criteria = _search_criteria(pattern)
+            status, data = client.search(None, "SINCE", window, *criteria)
             if status != "OK":
-                logger.warning("IMAP search failed for sender %r", pattern)
+                logger.warning("IMAP search failed for pattern %r", pattern)
                 continue
             for uid in data[0].split():
                 found.setdefault(uid, course_label)
