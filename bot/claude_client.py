@@ -32,6 +32,10 @@ class PromptContext:
     #: Today's remaining events, so "after my next class" resolves to a time
     #: instead of coming back as an unanswerable anchor.
     upcoming_events: list[tuple[str, str]] = field(default_factory=list)
+    #: True when tonight's check-in is still awaiting an answer, so a bare
+    #: "did the reflection, skipped the reading" routes there rather than
+    #: being filed as a new task.
+    checkin_pending: bool = False
 
     def render(self) -> str:
         lines = [
@@ -51,6 +55,14 @@ class PromptContext:
         else:
             lines.append(
                 "No courses are on file yet, so accept whatever course label he uses."
+            )
+
+        if self.checkin_pending:
+            lines.append("")
+            lines.append(
+                "An evening check-in was sent and is still unanswered. A message "
+                "that reads as an answer to it - what he did or didn't get to - "
+                "is checkin_reply, not a new task."
             )
 
         if self.upcoming_events:
@@ -97,6 +109,14 @@ class Writer(Protocol):
     """Anything that can write prose from a system prompt and a data block."""
 
     def compose(self, system: str, user: str, *, max_tokens: int = 1024) -> str: ...
+
+
+class ToolCaller(Protocol):
+    """Anything that can run one named tool and hand back its input."""
+
+    def call_tool(
+        self, system: str, user: str, tool: dict, *, max_tokens: int = 1024
+    ) -> dict: ...
 
 
 def build_system_prompt(context: PromptContext) -> str:
@@ -160,6 +180,35 @@ class AnthropicClient:
             ) from exc
 
         return parse_tool_use(response.content)
+
+    def call_tool(
+        self, system: str, user: str, tool: dict, *, max_tokens: int = 1024
+    ) -> dict:
+        """Run one named tool and return its input.
+
+        Structured extraction goes through the tool schema rather than asking
+        for JSON in prose: the schema is enforced, and there is no parsing step
+        to get wrong.
+        """
+        try:
+            response = self._client.messages.create(
+                model=self._model,
+                max_tokens=max_tokens,
+                system=system,
+                tools=[tool],
+                tool_choice={"type": "tool", "name": tool["name"]},
+                messages=[{"role": "user", "content": user}],
+            )
+        except Exception as exc:  # noqa: BLE001 - SDK raises a family of errors
+            raise AssistantError(
+                E.CLAUDE, _explain(exc), cause=exc, trigger=user[:200]
+            ) from exc
+
+        for block in response.content:
+            if getattr(block, "type", None) == "tool_use" and block.name == tool["name"]:
+                return dict(block.input or {})
+        return {}
+
 
     def compose(self, system: str, user: str, *, max_tokens: int = 1024) -> str:
         """Free prose, no tools. Used by the brief and check-in."""

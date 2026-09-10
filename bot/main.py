@@ -31,6 +31,7 @@ from telegram.ext import (
 from bot import (
     backlog as backlog_rules,
     brief,
+    checkin as checkin_mod,
     email_reader,
     image_reader,
     google_calendar,
@@ -297,14 +298,29 @@ async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def cmd_quiet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle the morning brief off or on."""
+    """Toggle the morning brief, or the evening check-in, off and on.
+
+    Separate toggles: Section 10 asks for the evening one to be silenceable on
+    its own, since wanting the brief and not wanting to be asked about your day
+    are different preferences.
+    """
+    args = context.args or []
+    evening = bool(args) and args[0].lower().startswith("even")
+    key = "quiet_evening" if evening else "quiet_morning"
+    label = "Evening check-in" if evening else "Morning brief"
+
     conn = _db(context)
     with _db_lock:
-        now_quiet = database.get_config(conn, "quiet_morning", "0") == "1"
-        database.set_config(conn, "quiet_morning", "0" if now_quiet else "1")
-    await update.effective_message.reply_text(
-        "Morning brief back on." if now_quiet else "Morning brief off. /quiet again to undo."
-    )
+        currently_quiet = database.get_config(conn, key, "0") == "1"
+        database.set_config(conn, key, "0" if currently_quiet else "1")
+
+    if currently_quiet:
+        await update.effective_message.reply_text(f"{label} back on.")
+    else:
+        again = "/quiet evening" if evening else "/quiet"
+        await update.effective_message.reply_text(
+            f"{label} off. {again} again to undo."
+        )
 
 
 def _gather_email(app: Application, conn: sqlite3.Connection) -> list:
@@ -430,6 +446,61 @@ async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
         await asyncio.to_thread(_consume_nudges, app)
     except AssistantError as err:
         log_error(err)
+
+
+def _build_checkin(app: Application) -> tuple[str, list[int]] | None:
+    """Compose tonight's check-in, or None if there is nothing worth asking."""
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+    writer = app.bot_data.get(KEY_CLASSIFIER)
+    if writer is None:
+        return None
+
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        now = datetime.now(ZoneInfo(timezone))
+        context = checkin_mod.gather(conn, now)
+        if not checkin_mod.has_anything_to_ask(context):
+            logger.info("Nothing on today; skipping the evening check-in")
+            return None
+        offered = [
+            row["id"]
+            for group in (context.due_today, context.attendance_today, context.in_progress)
+            for row in group
+        ]
+    return checkin_mod.compose(context, writer), offered
+
+
+async def job_evening_checkin(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Ask once, in the evening, what actually happened (plan Section 10)."""
+    app = context.application
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+    if database.get_config(conn, "quiet_evening", "0") == "1":
+        logger.info("Evening check-in suppressed by /quiet evening")
+        return
+
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    try:
+        built = await asyncio.to_thread(_build_checkin, app)
+    except Exception as exc:  # noqa: BLE001 - the job must never die silently
+        raise AssistantError(
+            E.CHECKIN_FAILED, "Couldn't put the evening check-in together.", cause=exc
+        ) from exc
+
+    if built is None:
+        return
+    text, offered = built
+
+    try:
+        await context.bot.send_message(settings.owner_telegram_id, text)
+    except Exception as exc:  # noqa: BLE001
+        raise AssistantError(
+            E.CHECKIN_FAILED, "Built the check-in but couldn't send it.", cause=exc
+        ) from exc
+
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        checkin_mod.mark_sent(conn, datetime.now(ZoneInfo(timezone)), offered)
+    logger.info("Evening check-in sent, offering %d task(s)", len(offered))
 
 
 async def job_poll_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -636,11 +707,27 @@ def _schedule_jobs(app: Application, conn: sqlite3.Connection) -> None:
         check_at = time(8, 15, tzinfo=timezone)
     app.job_queue.run_daily(job_token_check, check_at, name="token_check")
 
+    raw_evening = database.get_config(conn, "evening_checkin_time", "21:00")
+    try:
+        hour, minute = (int(part) for part in raw_evening.split(":", 1))
+        evening_at = time(hour, minute, tzinfo=timezone)
+    except ValueError:
+        logger.warning(
+            "evening_checkin_time %r isn't HH:MM; defaulting to 21:00", raw_evening
+        )
+        evening_at = time(21, 0, tzinfo=timezone)
+    app.job_queue.run_daily(job_evening_checkin, evening_at, name="evening_checkin")
+
     interval = int(database.get_config(conn, "reminder_poll_seconds", "60"))
     app.job_queue.run_repeating(
         job_poll_reminders, interval=interval, first=interval, name="reminder_poller"
     )
-    logger.info("Scheduled morning brief at %s (%s)", send_at.strftime("%H:%M"), timezone)
+    logger.info(
+        "Scheduled morning brief at %s, evening check-in at %s (%s)",
+        send_at.strftime("%H:%M"),
+        evening_at.strftime("%H:%M"),
+        timezone,
+    )
 
 
 def main() -> None:

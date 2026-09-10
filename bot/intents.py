@@ -22,6 +22,7 @@ SET_GOAL = "set_goal"
 SAVE_NOTE = "save_note"
 ANSWER_QUERY = "answer_query"
 JUST_CHAT = "just_chat"
+CHECKIN_REPLY = "checkin_reply"
 ASK_CLARIFICATION = "ask_clarification"
 
 
@@ -277,6 +278,25 @@ INTENT_TOOLS: list[dict[str, Any]] = [
             "thinking out loud, small talk."
         ),
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": CHECKIN_REPLY,
+        "description": (
+            "Kaan is answering the evening check-in. Use this ONLY when the "
+            "system prompt says a check-in is awaiting a reply and this message "
+            "reads as an answer to it — what he did or didn't get to today. If "
+            "no check-in is pending, this intent does not apply."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "His answer, verbatim enough to parse in detail later.",
+                }
+            },
+            "required": ["summary"],
+        },
     },
     {
         "name": ASK_CLARIFICATION,

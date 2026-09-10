@@ -14,17 +14,19 @@ from __future__ import annotations
 import sqlite3
 from datetime import datetime, timedelta
 
-from bot import query, repository as repo
+from bot import checkin as checkin_mod, query, repository as repo
 from contextvars import ContextVar
 
 from bot.claude_client import Classifier, PromptContext, Writer
 from bot.errors import AssistantError, E, logger
 from bot.formatting import pct
+from bot.voice import VOICE
 from bot.intents import (
     ADD_REMINDER,
     ADD_TASK,
     ANSWER_QUERY,
     ASK_CLARIFICATION,
+    CHECKIN_REPLY,
     CLARIFICATION_CODES,
     JUST_CHAT,
     SAVE_NOTE,
@@ -247,6 +249,41 @@ def _handle_just_chat(conn: sqlite3.Connection, intent: ParsedIntent, now: datet
     return "Noted. Conversation isn't wired up yet — I can save and track things."
 
 
+def _handle_checkin_reply(
+    conn: sqlite3.Connection, intent: ParsedIntent, now: datetime
+) -> str:
+    """Apply the evening check-in answer.
+
+    A second, richer call than the classification: the first decides this is a
+    check-in reply, this one works out which specific rows he meant. Ids come
+    from the check-in itself, so applying it is a lookup — matching the wrong
+    row here would quietly corrupt his record of the term.
+    """
+    writer = _WRITER.get()
+    if writer is None:
+        return "Got it, but I can't record that right now — no Claude client."
+
+    offered = checkin_mod.pending(conn, now)
+    if not offered:
+        return "Noted."
+
+    context = checkin_mod.gather(conn, now)
+    payload = writer.call_tool(
+        checkin_mod.REPLY_SYSTEM.format(
+            voice=VOICE, data=checkin_mod.render_context(context)
+        ),
+        intent.get("summary", ""),
+        checkin_mod.REPLY_TOOL,
+        max_tokens=900,
+    )
+    result = checkin_mod.parse_reply(payload, offered)
+    counts = checkin_mod.apply(conn, result, now=now)
+    checkin_mod.clear(conn)
+
+    logger.info("Check-in reply applied: %s", counts)
+    return result.reply or "Recorded."
+
+
 def _handle_ask_clarification(
     conn: sqlite3.Connection, intent: ParsedIntent, now: datetime
 ) -> str:
@@ -267,6 +304,7 @@ HANDLERS = {
     SAVE_NOTE: _handle_save_note,
     ANSWER_QUERY: _handle_answer_query,
     JUST_CHAT: _handle_just_chat,
+    CHECKIN_REPLY: _handle_checkin_reply,
     ASK_CLARIFICATION: _handle_ask_clarification,
 }
 
@@ -290,6 +328,7 @@ def build_context(
         courses=repo.course_codes(conn),
         week_number=repo.week_number(conn, now.date()),
         upcoming_events=upcoming_events or [],
+        checkin_pending=checkin_mod.pending(conn, now) is not None,
     )
 
 
