@@ -32,9 +32,12 @@ class SchemaTestCase(unittest.TestCase):
     # -- migrations ---------------------------------------------------------
 
     def test_migrations_apply_and_are_idempotent(self) -> None:
-        self.assertEqual(database.current_version(self.conn), 1)
+        # Tied to the files on disk rather than a hardcoded number, so adding a
+        # migration doesn't break this test for no reason.
+        latest = max(n for n, _ in database._discover_migrations())
+        self.assertEqual(database.current_version(self.conn), latest)
         self.assertEqual(database.migrate(self.conn), [], "re-running should be a no-op")
-        self.assertEqual(database.current_version(self.conn), 1)
+        self.assertEqual(database.current_version(self.conn), latest)
 
     def test_all_planned_tables_exist(self) -> None:
         rows = self.conn.execute(

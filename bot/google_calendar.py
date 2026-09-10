@@ -98,6 +98,21 @@ def _load_credentials(token_path: Path, client_secrets: Path):
     )
 
 
+def verify(token_path: Path, client_secrets: Path) -> AssistantError | None:
+    """Check the stored credentials without reading any calendar data.
+
+    Returns the failure rather than raising, so the daily self-check can decide
+    whether it is worth waking Kaan over. Refreshing here is deliberate: an
+    expired access token that refreshes cleanly is healthy, and only a refresh
+    that Google rejects means real trouble.
+    """
+    try:
+        _load_credentials(token_path, client_secrets)
+    except AssistantError as err:
+        return err
+    return None
+
+
 def _service(token_path: Path, client_secrets: Path):
     from googleapiclient.discovery import build
 

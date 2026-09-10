@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Privacy Policy — Kags Assistant</title>
+<style>
+  :root {
+    --bg: #fbfaf8;
+    --fg: #1c1b19;
+    --muted: #5c5952;
+    --rule: #e2ded6;
+    --accent: #7a5c2e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161513;
+      --fg: #eceae6;
+      --muted: #a19c92;
+      --rule: #2e2c28;
+      --accent: #d3ab6a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 16px/1.65 ui-serif, Georgia, "Times New Roman", serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 40rem; margin: 0 auto; padding: 4rem 1.5rem 6rem; }
+  h1 { font-size: 1.9rem; line-height: 1.2; margin: 0 0 .3rem; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 2.5rem; font-size: .95rem; }
+  h2 {
+    font-size: 1.05rem;
+    text-transform: uppercase;
+    letter-spacing: .08em;
+    color: var(--accent);
+    margin: 2.5rem 0 .6rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+  p { margin: 0 0 1rem; }
+  ul { margin: 0 0 1rem; padding-left: 1.2rem; }
+  li { margin-bottom: .45rem; }
+  a { color: var(--accent); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .9em;
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    padding: .1em .35em;
+    border-radius: 3px;
+  }
+  footer {
+    margin-top: 3.5rem;
+    padding-top: 1.25rem;
+    border-top: 1px solid var(--rule);
+    color: var(--muted);
+    font-size: .9rem;
+    font-family: ui-sans-serif, system-ui, sans-serif;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>Privacy Policy</h1>
+  <p class="sub">Kags Assistant &middot; last updated 9 September 2026</p>
+
+  <p>
+    Kags Assistant is a private Telegram bot operated by one individual for
+    their own personal use. It has a single user, its owner. It is not offered
+    to the public, and no other person's data is collected or processed.
+  </p>
+
+  <h2>What the app accesses</h2>
+  <p>
+    With the owner's authorisation, the app reads calendar events from the
+    owner's own Google Account using the
+    <code>calendar.events.readonly</code> scope. This is read-only: the app
+    cannot create, modify, or delete calendar entries, and it cannot access
+    Gmail, Drive, Contacts, or any other Google service.
+  </p>
+  <p>
+    Event titles, times, and locations are read so the daily brief can report
+    what is scheduled that day.
+  </p>
+
+  <h2>What else the app stores</h2>
+  <ul>
+    <li>Coursework deadlines and grade weights, extracted from syllabus PDFs the owner uploads.</li>
+    <li>Tasks, reminders, notes, and goals the owner sends as text messages.</li>
+    <li>The owner's Telegram user ID, used to ignore messages from anyone else.</li>
+  </ul>
+
+  <h2>Where data is stored</h2>
+  <p>
+    All data is stored in a local database file on a private home server owned
+    by the operator. Nothing is stored on third-party servers, and there is no
+    hosted service, shared database, or backup to any cloud provider.
+  </p>
+
+  <h2>Third parties</h2>
+  <p>
+    Message text, syllabus contents, and the daily brief's contents are sent to
+    the <a href="https://www.anthropic.com/legal/privacy" rel="noopener">Anthropic API</a>
+    to be interpreted and written into readable form. Weather data is fetched
+    from <a href="https://open-meteo.com/" rel="noopener">Open-Meteo</a>, which
+    receives only an approximate latitude and longitude and no personal data.
+    Messages are delivered through Telegram.
+  </p>
+  <p>
+    Data is not sold, rented, or shared with anyone else, and is not used for
+    advertising, analytics, or profiling.
+  </p>
+
+  <h2>Retention and deletion</h2>
+  <p>
+    Calendar data is read at the moment a brief is generated and is not retained
+    afterwards. Tasks, reminders, and notes stay in the local database until the
+    owner deletes them. The owner can revoke the app's access to their Google
+    Account at any time via
+    <a href="https://myaccount.google.com/permissions" rel="noopener">Google Account permissions</a>,
+    which immediately and permanently stops all calendar access.
+  </p>
+
+  <h2>Contact</h2>
+  <p>
+    Questions about this policy:
+    <a href="mailto:kaan.taylanca@gmail.com">kaan.taylanca@gmail.com</a>
+  </p>
+
+  <footer>
+    <a href="/">Back to Kags Assistant</a>
+  </footer>
+</main>
+</body>
+</html>

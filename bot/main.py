@@ -28,7 +28,7 @@ from telegram.ext import (
     filters,
 )
 
-from bot import brief, repository as repo, router, syllabus as syl
+from bot import brief, google_calendar, repository as repo, router, syllabus as syl
 from bot.claude_client import AnthropicClient
 from bot.config import ConfigError, Settings, load_settings
 from bot.errors import AssistantError, E, log_error, logger, setup_logging
@@ -275,6 +275,57 @@ def _is_transient(err: BaseException | None) -> bool:
     return isinstance(err, (NetworkError, TimedOut))
 
 
+async def job_token_check(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily credential check that stays silent unless something is wrong.
+
+    Plan Section 8: Kaan hears about a dead token, and never about a healthy
+    one. A token that expires quietly is the worst case here — the calendar
+    just goes blank in the brief with nothing saying why.
+    """
+    app = context.application
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+
+    token = settings.google_token_personal
+    if not token.exists():
+        return  # Calendar was never connected; nothing to report.
+
+    failure = await asyncio.to_thread(
+        google_calendar.verify, token, settings.google_client_secrets
+    )
+
+    with _db_lock:
+        today = datetime.now(
+            ZoneInfo(database.get_config(conn, "timezone", "America/Toronto"))
+        ).date().isoformat()
+        already = database.get_config(conn, "token_alerted_on", "")
+
+        if failure is None:
+            if already:
+                database.set_config(conn, "token_alerted_on", "")
+                recovered = True
+            else:
+                recovered = False
+        else:
+            recovered = False
+            if already == today:
+                return  # One alert a day is enough; it is already actionable.
+            database.set_config(conn, "token_alerted_on", today)
+
+    if failure is not None:
+        log_error(failure)
+        await context.bot.send_message(
+            settings.owner_telegram_id, failure.user_message()
+        )
+        return
+
+    if recovered:
+        logger.info("Google credentials healthy again")
+        await context.bot.send_message(
+            settings.owner_telegram_id, "Google Calendar is working again."
+        )
+
+
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Single funnel for every failure: log the detail, tell Kaan the code."""
     err = context.error
@@ -373,6 +424,15 @@ def _schedule_jobs(app: Application, conn: sqlite3.Connection) -> None:
         send_at = time(7, 30, tzinfo=timezone)
 
     app.job_queue.run_daily(job_morning_brief, send_at, name="morning_brief")
+
+    raw_check = database.get_config(conn, "token_check_time", "08:15")
+    try:
+        hour, minute = (int(part) for part in raw_check.split(":", 1))
+        check_at = time(hour, minute, tzinfo=timezone)
+    except ValueError:
+        logger.warning("token_check_time %r isn't HH:MM; defaulting to 08:15", raw_check)
+        check_at = time(8, 15, tzinfo=timezone)
+    app.job_queue.run_daily(job_token_check, check_at, name="token_check")
 
     interval = int(database.get_config(conn, "reminder_poll_seconds", "60"))
     app.job_queue.run_repeating(
