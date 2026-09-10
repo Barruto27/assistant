@@ -22,6 +22,7 @@ from pathlib import Path
 from bot import google_calendar, repository as repo, weather
 from bot.claude_client import Writer
 from bot.errors import AssistantError, E, log_error, logger
+from bot.email_reader import FlaggedEmail
 from bot.google_calendar import CalendarEvent
 from bot.voice import VOICE
 from db.database import get_config
@@ -58,6 +59,9 @@ class BriefContext:
     upcoming: list[sqlite3.Row] = field(default_factory=list)
     reminders: list[sqlite3.Row] = field(default_factory=list)
     week_topics: list[tuple[str, str]] = field(default_factory=list)
+    #: Email findings. Surfaced only — Section 6 is explicit that nothing is
+    #: written to tasks until Kaan confirms.
+    flagged_emails: list[FlaggedEmail] = field(default_factory=list)
     #: Subsystems that couldn't be reached, named so the brief can say so
     #: instead of quietly omitting a section that should have had content.
     unavailable: list[str] = field(default_factory=list)
@@ -86,11 +90,18 @@ def assemble(
     longitude: float | None = None,
     calendar_token: Path | None = None,
     calendar_secrets: Path | None = None,
+    flagged_emails: list[FlaggedEmail] | None = None,
 ) -> BriefContext:
-    """Gather the facts. Never raises for an unavailable subsystem."""
+    """Gather the facts. Never raises for an unavailable subsystem.
+
+    ``flagged_emails`` is passed in rather than fetched here: deciding which
+    mail matters needs a Claude call, and stage 1 stays free of those so it
+    remains testable and incapable of inventing anything.
+    """
     today = now.date()
     tomorrow = today + timedelta(days=1)
     context = BriefContext(now=now, week_number=repo.week_number(conn, today))
+    context.flagged_emails = list(flagged_emails or [])
 
     context.goals = repo.active_goals(conn)
     context.gym_split = repo.gym_split_for(conn, today.weekday())
@@ -227,6 +238,10 @@ def render_facts(context: BriefContext) -> str:
         ],
     )
     section("THIS WEEK'S COURSE TOPICS", [f"{code}: {topic}" for code, topic in context.week_topics])
+    section(
+        "FLAGGED IN EMAIL (not saved - Kaan confirms before anything is written)",
+        [item.line() for item in context.flagged_emails],
+    )
     if context.gym_split:
         lines.append("")
         lines.append(f"GYM TODAY: {context.gym_split}")
@@ -274,7 +289,9 @@ Then, in this order, skipping anything with no facts:
 6. Today's gym split
 7. Carried-over reminders
 8. The rest of the week: non-lecture events, upcoming deadlines, course topics
-9. What to prep for tomorrow
+9. Anything flagged in email — say plainly that it came from an email and is
+   not saved yet, so he can confirm it
+10. What to prep for tomorrow
 
 Formatting: this is a Telegram message. Short lines, no markdown headers, no
 bold. A bare line of text for each section beats a label. Under 200 words unless

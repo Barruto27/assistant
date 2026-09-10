@@ -73,6 +73,36 @@ def seed_courses(conn, path: Path) -> int:
     return len(rows)
 
 
+def seed_senders(conn, path: Path) -> int:
+    """Load the email allowlist.
+
+    Accepts ``{"yorku.ca": "PSYC 3265", "prof@yorku.ca": null}`` or a bare list
+    of patterns. A pattern is matched as a substring of the From header, so a
+    bare domain catches every sender at that domain.
+
+    This list is the only thing that gets read from the mailbox. An empty list
+    means no mail is scanned at all, which is the safe default for an inbox
+    full of personal messages.
+    """
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        rows = [(str(pattern).strip().lower(), None) for pattern in data]
+    else:
+        rows = [
+            (str(pattern).strip().lower(), (str(label).strip() if label else None))
+            for pattern, label in data.items()
+        ]
+
+    with database.transaction(conn):
+        conn.executemany(
+            "INSERT INTO known_senders (pattern, course_label) VALUES (?, ?) "
+            "ON CONFLICT(pattern) DO UPDATE SET "
+            "course_label = COALESCE(excluded.course_label, course_label), active = 1",
+            rows,
+        )
+    return len(rows)
+
+
 def seed_config(conn, path: Path) -> int:
     """Load ``{"semester_start_date": "2026-09-07", ...}`` into the config table."""
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -86,11 +116,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gym", type=Path, help="JSON map of weekday -> split name")
     parser.add_argument("--config", type=Path, help="JSON map of config key -> value")
     parser.add_argument("--courses", type=Path, help="JSON map of course code -> name")
+    parser.add_argument("--senders", type=Path, help="JSON allowlist of email senders")
     parser.add_argument("--db", help="SQLite path; defaults to DB_PATH from .env")
     args = parser.parse_args(argv)
 
-    if not (args.gym or args.config or args.courses):
-        parser.error("nothing to do - pass --gym, --config and/or --courses")
+    if not (args.gym or args.config or args.courses or args.senders):
+        parser.error("nothing to do - pass --gym, --config, --courses and/or --senders")
 
     if args.db:
         db_path = Path(args.db)
@@ -114,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
             print(f"gym: {seed_gym(conn, args.gym)} day(s) loaded")
         if args.config:
             print(f"config: {seed_config(conn, args.config)} key(s) set")
+        if args.senders:
+            print(f"senders: {seed_senders(conn, args.senders)} pattern(s) allowlisted")
     finally:
         conn.close()
     return 0

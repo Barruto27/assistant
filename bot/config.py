@@ -49,6 +49,9 @@ class Settings:
     weather_latitude: float
     weather_longitude: float
     weather_timezone: str
+    gmail_imap_user: str | None
+    gmail_app_password: str | None
+    gmail_imap_host: str
 
 
 def load_settings(*, require_anthropic: bool = False) -> Settings:
@@ -97,4 +100,11 @@ def load_settings(*, require_anthropic: bool = False) -> Settings:
         weather_latitude=_float("WEATHER_LATITUDE", "43.7735"),
         weather_longitude=_float("WEATHER_LONGITUDE", "-79.5019"),
         weather_timezone=os.getenv("WEATHER_TIMEZONE", "").strip() or "America/Toronto",
+        gmail_imap_user=os.getenv("GMAIL_IMAP_USER", "").strip() or None,
+        # Google prints app passwords in four groups of four; the spaces are
+        # presentation only and IMAP rejects them.
+        gmail_app_password=(
+            os.getenv("GMAIL_APP_PASSWORD", "").replace(" ", "").strip() or None
+        ),
+        gmail_imap_host=os.getenv("GMAIL_IMAP_HOST", "").strip() or "imap.gmail.com",
     )

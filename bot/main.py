@@ -28,7 +28,14 @@ from telegram.ext import (
     filters,
 )
 
-from bot import brief, google_calendar, repository as repo, router, syllabus as syl
+from bot import (
+    brief,
+    email_reader,
+    google_calendar,
+    repository as repo,
+    router,
+    syllabus as syl,
+)
 from bot.claude_client import AnthropicClient
 from bot.config import ConfigError, Settings, load_settings
 from bot.errors import AssistantError, E, log_error, logger, setup_logging
@@ -184,11 +191,52 @@ async def cmd_quiet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _gather_email(app: Application, conn: sqlite3.Connection) -> list:
+    """Fetch and flag course email. Returns [] rather than raising.
+
+    Kept out of brief.assemble because flagging needs a Claude call and stage 1
+    stays free of those. Failures are logged and reported as an unavailable
+    subsystem, never allowed to take the whole brief down.
+    """
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    if not (settings.gmail_imap_user and settings.gmail_app_password):
+        return []
+
+    with _db_lock:
+        senders = email_reader.known_senders(conn)
+    if not senders:
+        return []
+
+    messages = email_reader.fetch(
+        host=settings.gmail_imap_host,
+        user=settings.gmail_imap_user,
+        password=settings.gmail_app_password,
+        senders=senders,
+        since=email_reader.default_window(),
+    )
+    if not messages or not settings.anthropic_api_key:
+        return []
+
+    from anthropic import Anthropic
+
+    return email_reader.flag(
+        messages, Anthropic(api_key=settings.anthropic_api_key), settings.claude_model
+    )
+
+
 def _build_brief(app: Application) -> str:
     """Assemble and write the brief. Blocking; call via asyncio.to_thread."""
     settings: Settings = app.bot_data[KEY_SETTINGS]
     conn: sqlite3.Connection = app.bot_data[KEY_DB]
     writer = app.bot_data.get(KEY_CLASSIFIER)
+
+    flagged: list = []
+    email_failed = False
+    try:
+        flagged = _gather_email(app, conn)
+    except AssistantError as err:
+        log_error(err)
+        email_failed = True
 
     with _db_lock:
         timezone = database.get_config(conn, "timezone", "America/Toronto")
@@ -201,7 +249,10 @@ def _build_brief(app: Application) -> str:
             longitude=settings.weather_longitude,
             calendar_token=token if token.exists() else None,
             calendar_secrets=settings.google_client_secrets,
+            flagged_emails=flagged,
         )
+    if email_failed:
+        context.unavailable.append("email")
     return brief.generate(context, writer)
 
 
