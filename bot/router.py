@@ -125,11 +125,12 @@ def _handle_add_reminder(conn: sqlite3.Connection, intent: ParsedIntent, now: da
     if not fire_at:
         anchor = intent.get("anchor")
         if anchor:
-            # Resolving this needs calendar data, which arrives in Session 6.
+            # Today's schedule is given to the parser, so reaching here means
+            # the calendar genuinely doesn't settle it — say which part.
             raise AssistantError(
                 E.MISSING_FIELD,
-                f"I can't work out when {anchor!r} is yet — my calendar isn't "
-                "connected. Give me a time and I'll set it.",
+                f"Nothing on today's calendar tells me when {anchor!r} is. "
+                "Give me a time and I'll set it.",
             )
         raise AssistantError(E.MISSING_FIELD, "When should I remind you?")
 
@@ -239,7 +240,12 @@ HANDLERS = {
 # ---------------------------------------------------------------------------
 
 
-def build_context(conn: sqlite3.Connection, now: datetime) -> PromptContext:
+def build_context(
+    conn: sqlite3.Connection,
+    now: datetime,
+    *,
+    upcoming_events: list[tuple[str, str]] | None = None,
+) -> PromptContext:
     from db.database import get_config
 
     return PromptContext(
@@ -247,6 +253,7 @@ def build_context(conn: sqlite3.Connection, now: datetime) -> PromptContext:
         timezone=get_config(conn, "timezone", "America/Toronto"),
         courses=repo.course_codes(conn),
         week_number=repo.week_number(conn, now.date()),
+        upcoming_events=upcoming_events or [],
     )
 
 
@@ -257,6 +264,7 @@ def handle_message(
     *,
     now: datetime | None = None,
     writer: Writer | None = None,
+    upcoming_events: list[tuple[str, str]] | None = None,
 ) -> str:
     """Classify one message, run its handler, return the reply text.
 
@@ -266,7 +274,9 @@ def handle_message(
     moment = now or datetime.now()
     token = _WRITER.set(writer)
     try:
-        intent = classifier.classify(message, build_context(conn, moment))
+        intent = classifier.classify(
+            message, build_context(conn, moment, upcoming_events=upcoming_events)
+        )
     except Exception:
         _WRITER.reset(token)
         raise

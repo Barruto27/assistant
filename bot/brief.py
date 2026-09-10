@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from bot import google_calendar, repository as repo, weather
+from bot import backlog as backlog_rules, google_calendar, repository as repo, weather
 from bot.claude_client import Writer
 from bot.errors import AssistantError, E, log_error, logger
 from bot.formatting import pct
@@ -66,6 +66,14 @@ class BriefContext:
     #: Email findings. Surfaced only — Section 6 is explicit that nothing is
     #: written to tasks until Kaan confirms.
     flagged_emails: list[FlaggedEmail] = field(default_factory=list)
+    #: Count of set-aside work, only when a weekly mention is due. None the
+    #: rest of the time, because a daily count of things he has already decided
+    #: not to do is the nagging the backlog rule exists to prevent.
+    backlog_count: int | None = None
+    #: Weekly/monthly goals with no reported movement. Nudged once, gently.
+    stalled_goals: list[sqlite3.Row] = field(default_factory=list)
+    #: Yesterday's unclosed daily goal. Exactly one soft mention, ever.
+    missed_daily: list[sqlite3.Row] = field(default_factory=list)
     #: Subsystems that couldn't be reached, named so the brief can say so
     #: instead of quietly omitting a section that should have had content.
     unavailable: list[str] = field(default_factory=list)
@@ -127,6 +135,12 @@ def assemble(
         "attendance = 0 AND due_date > ? AND due_date <= ?",
         (tomorrow.isoformat(), (today + timedelta(days=7)).isoformat()),
     )
+
+    context.stalled_goals = repo.stalled_goals(conn, now)
+    context.missed_daily = repo.missed_daily_goals(conn, today)
+
+    if backlog_rules.weekly_nudge_due(conn, now):
+        context.backlog_count = len(backlog_rules.backlog(conn))
 
     # Reminders already due but not yet sent, i.e. carried over.
     context.reminders = repo.due_reminders(conn, now)
@@ -261,6 +275,23 @@ def render_facts(context: BriefContext) -> str:
         "FLAGGED IN EMAIL (not saved - Kaan confirms before anything is written)",
         [item.line() for item in context.flagged_emails],
     )
+    section(
+        "GOALS WITH NO REPORTED MOVEMENT (mention one, lightly, as a question "
+        "rather than a prod - and only if the day is not already full)",
+        [f"{row['tier']}: {row['text']}" for row in context.stalled_goals],
+    )
+    section(
+        "DAILY GOAL THAT PASSED UNCLOSED (one brief, unjudgemental mention - "
+        "it will never be raised again)",
+        [row["text"] for row in context.missed_daily],
+    )
+    if context.backlog_count:
+        lines.append("")
+        lines.append(
+            f"BACKLOG: {context.backlog_count} item(s) set aside as overdue and "
+            "low-stakes. Mention once, in passing, as something he could review "
+            "with /backlog. Do not list them and do not press."
+        )
     if context.gym_split:
         lines.append("")
         lines.append(f"GYM TODAY: {context.gym_split}")

@@ -263,3 +263,64 @@ def save_note(
         (text, joined),
         "that note",
     )
+
+def stalled_goals(
+    conn: sqlite3.Connection, now: datetime, *, quiet_days: int = 5
+) -> list[sqlite3.Row]:
+    """Weekly and monthly goals with no reported movement for a while.
+
+    Daily goals are excluded: a daily goal that saw no progress is just an
+    ordinary day, and saying so every morning is the nagging Section 11 warns
+    against. Only the longer horizons are worth a nudge, and only occasionally.
+    """
+    cutoff = (now - timedelta(days=quiet_days)).strftime(TS_FORMAT)
+    return _read(
+        conn,
+        "SELECT * FROM goals WHERE status = 'active' AND tier IN ('weekly', 'monthly') "
+        "AND COALESCE(last_progress_at, created_at) < ? "
+        "AND (nudged_at IS NULL OR nudged_at < ?) "
+        "ORDER BY tier, id",
+        (cutoff, cutoff),
+    )
+
+
+def mark_goal_nudged(conn: sqlite3.Connection, goal_id: int, now: datetime) -> None:
+    """Record the nudge so it happens once, not every morning."""
+    _write(
+        conn,
+        "UPDATE goals SET nudged_at = ? WHERE id = ?",
+        (now.strftime(TS_FORMAT), goal_id),
+        "the goal nudge",
+    )
+
+
+def record_goal_progress(conn: sqlite3.Connection, goal_id: int, now: datetime) -> None:
+    """Movement resets both the staleness clock and the nudge."""
+    _write(
+        conn,
+        "UPDATE goals SET last_progress_at = ?, nudged_at = NULL WHERE id = ?",
+        (now.strftime(TS_FORMAT), goal_id),
+        "the goal progress",
+    )
+
+
+def missed_daily_goals(conn: sqlite3.Connection, today: date) -> list[sqlite3.Row]:
+    """Yesterday's daily goals that were never closed out.
+
+    Section 11 allows exactly one soft mention, so missed_mentioned gates it.
+    """
+    return _read(
+        conn,
+        "SELECT * FROM goals WHERE tier = 'daily' AND status = 'active' "
+        "AND missed_mentioned = 0 AND expires_at IS NOT NULL AND expires_at < ?",
+        (today.isoformat(),),
+    )
+
+
+def mark_goal_missed_mentioned(conn: sqlite3.Connection, goal_id: int) -> None:
+    _write(
+        conn,
+        "UPDATE goals SET missed_mentioned = 1 WHERE id = ?",
+        (goal_id,),
+        "the goal",
+    )

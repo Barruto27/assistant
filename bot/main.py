@@ -29,6 +29,7 @@ from telegram.ext import (
 )
 
 from bot import (
+    backlog as backlog_rules,
     brief,
     email_reader,
     image_reader,
@@ -111,6 +112,40 @@ async def on_unknown_user(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     )
 
 
+def _remaining_today(settings: Settings, conn: sqlite3.Connection) -> list:
+    """Today's events that haven't happened yet, for resolving "after my class".
+
+    Returns [] on any failure: a reminder that needs a clock time is better
+    than no reply at all, and the handler says plainly when the calendar
+    couldn't settle it.
+    """
+    token = settings.google_token_personal
+    if not token.exists():
+        return []
+    try:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        now = datetime.now(ZoneInfo(timezone))
+        events = google_calendar.events_for_day(
+            token, settings.google_client_secrets, now.date(), timezone
+        )
+    except AssistantError as err:
+        log_error(err)
+        return []
+
+    remaining = []
+    for event in events:
+        if event.all_day:
+            continue
+        start = event.start
+        if getattr(start, "tzinfo", None) is None:
+            continue
+        if start < now:
+            continue
+        ends = event.end.strftime("%H:%M") if getattr(event.end, "strftime", None) else "?"
+        remaining.append((f"{start:%H:%M}-{ends}", event.summary))
+    return remaining
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Classify one message, run its handler, reply with the receipt."""
     classifier = context.application.bot_data.get(KEY_CLASSIFIER)
@@ -122,11 +157,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     text = update.effective_message.text
     conn = _db(context)
+    settings = _settings(context)
 
     def work() -> str:
         with _db_lock:
+            events = _remaining_today(settings, conn)
             # The classifier doubles as the Writer; answer_query needs prose.
-            return router.handle_message(conn, classifier, text, writer=classifier)
+            return router.handle_message(
+                conn, classifier, text, writer=classifier, upcoming_events=events
+            )
 
     # Off the event loop: the Anthropic SDK call is synchronous and would
     # otherwise stall every other update while it waits.
@@ -241,6 +280,22 @@ async def cmd_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.effective_message.reply_text(text)
 
 
+async def cmd_backlog(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """What has been set aside. Still on file, just out of the daily view."""
+    conn = _db(context)
+    with _db_lock:
+        backlog_rules.demote(conn)
+        rows = backlog_rules.backlog(conn)
+        database.set_config(
+            conn,
+            "backlog_nudged_on",
+            datetime.now(
+                ZoneInfo(database.get_config(conn, "timezone", "America/Toronto"))
+            ).date().isoformat(),
+        )
+    await update.effective_message.reply_text(backlog_rules.render(rows))
+
+
 async def cmd_quiet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Toggle the morning brief off or on."""
     conn = _db(context)
@@ -301,6 +356,12 @@ def _build_brief(app: Application) -> str:
 
     with _db_lock:
         timezone = database.get_config(conn, "timezone", "America/Toronto")
+        # Triage before assembling, so the brief reflects today's view rather
+        # than yesterday's pile.
+        try:
+            backlog_rules.demote(conn)
+        except AssistantError as err:
+            log_error(err)
         token = settings.google_token_personal
         context = brief.assemble(
             conn,
@@ -315,6 +376,25 @@ def _build_brief(app: Application) -> str:
     if email_failed:
         context.unavailable.append("email")
     return brief.generate(context, writer)
+
+
+def _consume_nudges(app: Application) -> None:
+    """Record that the one-time mentions have now been made.
+
+    Only after a scheduled send. /recap regenerates the same brief on demand,
+    and burning a goal's single soft mention on a preview Kaan asked for would
+    mean the real morning brief never carries it.
+    """
+    conn: sqlite3.Connection = app.bot_data[KEY_DB]
+    with _db_lock:
+        timezone = database.get_config(conn, "timezone", "America/Toronto")
+        now = datetime.now(ZoneInfo(timezone))
+        for goal in repo.stalled_goals(conn, now):
+            repo.mark_goal_nudged(conn, goal["id"], now)
+        for goal in repo.missed_daily_goals(conn, now.date()):
+            repo.mark_goal_missed_mentioned(conn, goal["id"])
+        if backlog_rules.backlog(conn):
+            database.set_config(conn, "backlog_nudged_on", now.date().isoformat())
 
 
 async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -344,6 +424,12 @@ async def job_morning_brief(context: ContextTypes.DEFAULT_TYPE) -> None:
     # so "did it go out?" can only be answered by asking Kaan whether his phone
     # buzzed — which is no way to debug a job that runs while he's asleep.
     logger.info("Morning brief sent (%d chars)", len(text))
+
+    # Only now that it has actually landed.
+    try:
+        await asyncio.to_thread(_consume_nudges, app)
+    except AssistantError as err:
+        log_error(err)
 
 
 async def job_poll_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -510,6 +596,7 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(CommandHandler("status", cmd_status, filters=owner_only))
     app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
     app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
+    app.add_handler(CommandHandler("backlog", cmd_backlog, filters=owner_only))
     app.add_handler(
         MessageHandler(owner_only & filters.Document.ALL, on_document)
     )

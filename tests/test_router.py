@@ -164,7 +164,9 @@ class RouterTestCase(unittest.TestCase):
                 )
             )
         self.assertEqual(ctx.exception.code, E.MISSING_FIELD)
-        self.assertIn("calendar isn't connected", ctx.exception.message)
+        # Today's schedule is given to the parser now, so reaching the anchor
+        # path means the calendar genuinely didn't settle it.
+        self.assertIn("Nothing on today's calendar", ctx.exception.message)
 
     def test_reminder_without_a_time_asks(self) -> None:
         with self.assertRaises(AssistantError) as ctx:

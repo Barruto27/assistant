@@ -29,6 +29,9 @@ class PromptContext:
     timezone: str = "America/Toronto"
     courses: list[str] = field(default_factory=list)
     week_number: int | None = None
+    #: Today's remaining events, so "after my next class" resolves to a time
+    #: instead of coming back as an unanswerable anchor.
+    upcoming_events: list[tuple[str, str]] = field(default_factory=list)
 
     def render(self) -> str:
         lines = [
@@ -48,6 +51,16 @@ class PromptContext:
         else:
             lines.append(
                 "No courses are on file yet, so accept whatever course label he uses."
+            )
+
+        if self.upcoming_events:
+            lines.append("")
+            lines.append("Still to come today:")
+            lines.extend(f"- {when} {what}" for when, what in self.upcoming_events)
+            lines.append(
+                "Use these to resolve a relative reminder - 'after my next "
+                "class' means shortly after that class ends. Only fall back to "
+                "anchor when nothing here settles it."
             )
         return "\n".join(lines)
 
