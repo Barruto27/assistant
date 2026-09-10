@@ -163,13 +163,30 @@ def _task_line(row: sqlite3.Row) -> str:
     return " | ".join(bits)
 
 
-def _event_line(event: CalendarEvent) -> str:
-    bits = [f"{event.when()} {event.summary}"]
+def _event_line(event: CalendarEvent, *, with_date: bool = False) -> str:
+    """One event as a fact line.
+
+    ``with_date`` is required for any section spanning more than one day. The
+    time alone reads as "today" to anything summarising it — a week's events
+    listed as bare clock times produced a brief that confidently placed next
+    Monday's appointment this afternoon.
+    """
+    when = event.when()
+    if with_date:
+        day = event.start
+        when = f"{WEEKDAYS[day.weekday()][:3]} {day:%b} {day.day} {when}"
+    bits = [f"{when} {event.summary}"]
     if event.location:
         bits.append(event.location)
     if event.recurring:
         bits.append("recurring (lecture/standing)")
     return " | ".join(bits)
+
+
+def _event_day(event: CalendarEvent) -> date:
+    """The calendar date an event falls on, all-day or timed."""
+    start = event.start
+    return start.date() if isinstance(start, datetime) else start
 
 
 def render_facts(context: BriefContext) -> str:
@@ -203,7 +220,11 @@ def render_facts(context: BriefContext) -> str:
     section("TODAY'S CALENDAR", [_event_line(e) for e in context.today_events])
     section(
         "THIS WEEK, EXCLUDING LECTURES",
-        [_event_line(e) for e in context.week_events if not e.is_lecture],
+        [
+            _event_line(e, with_date=True)
+            for e in context.week_events
+            if not e.is_lecture and _event_day(e) != today
+        ],
     )
     section("THIS WEEK'S COURSE TOPICS", [f"{code}: {topic}" for code, topic in context.week_topics])
     if context.gym_split:

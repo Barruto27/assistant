@@ -139,14 +139,56 @@ class RenderingTestCase(unittest.TestCase):
 
     def test_lectures_are_excluded_from_the_week_summary(self) -> None:
         context = brief.assemble(self.conn, now=NOW)
+        # A later day, not NOW: today's events have their own section and are
+        # deliberately excluded from the week list.
+        later = datetime(2026, 9, 17, 9, 0)
         context.week_events = [
-            CalendarEvent("PSYC lecture", NOW, None, False, recurring=True),
-            CalendarEvent("Dentist", NOW, None, False, recurring=False),
+            CalendarEvent("PSYC lecture", later, None, False, recurring=True),
+            CalendarEvent("Dentist", later, None, False, recurring=False),
         ]
         facts = brief.render_facts(context)
         week_section = facts.split("THIS WEEK, EXCLUDING LECTURES:")[1]
         self.assertIn("Dentist", week_section)
         self.assertNotIn("PSYC lecture", week_section)
+
+    def test_week_events_carry_their_date(self) -> None:
+        """A bare clock time in a seven-day list reads as "today".
+
+        This actually happened: next Monday's appointment was rendered as
+        "12:15 Appointment", and the brief placed it that afternoon.
+        """
+        context = brief.assemble(self.conn, now=NOW)
+        context.week_events = [
+            CalendarEvent("Appointment with atse", datetime(2026, 9, 21, 12, 15),
+                          None, False, recurring=False),
+        ]
+        facts = brief.render_facts(context)
+        self.assertIn("Mon Sep 21 12:15 Appointment with atse", facts)
+
+    def test_today_is_not_repeated_in_the_week_section(self) -> None:
+        """Today already has its own section; listing it twice invites confusion."""
+        context = brief.assemble(self.conn, now=NOW)
+        today_event = CalendarEvent("Dentist", datetime(2026, 9, 14, 9, 0),
+                                    None, False, recurring=False)
+        later = CalendarEvent("Haircut", datetime(2026, 9, 17, 9, 0),
+                              None, False, recurring=False)
+        context.today_events = [today_event]
+        context.week_events = [today_event, later]
+
+        facts = brief.render_facts(context)
+        week_section = facts.split("THIS WEEK, EXCLUDING LECTURES:")[1]
+        self.assertIn("Haircut", week_section)
+        self.assertNotIn("Dentist", week_section)
+        self.assertIn("Dentist", facts.split("TODAY'S CALENDAR:")[1].split("THIS WEEK")[0])
+
+    def test_all_day_week_events_also_carry_a_date(self) -> None:
+        from datetime import date as _date
+
+        context = brief.assemble(self.conn, now=NOW)
+        context.week_events = [
+            CalendarEvent("Reading week", _date(2026, 9, 18), None, True, recurring=False),
+        ]
+        self.assertIn("Fri Sep 18 all day Reading week", brief.render_facts(context))
 
     def test_unavailable_subsystems_are_named(self) -> None:
         context = brief.assemble(self.conn, now=NOW)
