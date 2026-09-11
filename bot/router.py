@@ -17,6 +17,7 @@ from datetime import datetime, timedelta
 
 from bot import checkin as checkin_mod, query, repository as repo
 from contextvars import ContextVar
+from typing import Any
 
 from bot.claude_client import Classifier, PromptContext, Writer
 from bot.errors import AssistantError, E, log_error, logger
@@ -27,6 +28,7 @@ from bot.intents import (
     ADD_TASK,
     ANSWER_QUERY,
     ASK_CLARIFICATION,
+    CHECK_EMAIL,
     CHECKIN_REPLY,
     CLARIFICATION_CODES,
     JUST_CHAT,
@@ -44,6 +46,9 @@ _WRITER: ContextVar[Writer | None] = ContextVar("writer", default=None)
 #: Today's remaining events, so an unresolved anchor can be settled here
 #: rather than bounced back to Kaan.
 _EVENTS: ContextVar[list] = ContextVar("events", default=[])
+#: Reads the mailbox and returns (flagged, scanned). Set by bot.main, which
+#: owns the IMAP credentials; None when email was never configured.
+_EMAIL: ContextVar[Any] = ContextVar("email_lookup", default=None)
 
 WEEKDAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 FULL_WEEKDAYS = [
@@ -365,6 +370,60 @@ def _handle_checkin_reply(
     return result.reply or "Recorded."
 
 
+def _handle_check_email(
+    conn: sqlite3.Connection, intent: ParsedIntent, now: datetime
+) -> str:
+    """Read the mailbox now and say what in it matters.
+
+    The same fetch and the same flagging the morning brief uses, so the two
+    cannot disagree. Read-only: nothing here becomes a task, which the reply
+    says outright rather than leaving him to assume either way.
+    """
+    return run_email_check(_EMAIL.get(), intent.get("course"))
+
+
+def run_email_check(lookup: Any, course: str | None = None) -> str:
+    """Read the mailbox and describe it. Shared by check_email and /email."""
+    if lookup is None:
+        return (
+            "I can't read your email — no mailbox is set up for me. That's "
+            "GMAIL_IMAP_USER and GMAIL_APP_PASSWORD in .env."
+        )
+
+    flagged, scanned = lookup()
+    if scanned is None:
+        return (
+            "I couldn't get into the mailbox just now. The morning brief will "
+            "try again at 07:30."
+        )
+
+    if course:
+        flagged = [
+            item for item in flagged
+            if not item.course or item.course.lower() == str(course).lower()
+        ]
+
+    if not flagged:
+        about = f" about {course}" if course else ""
+        if not scanned:
+            return f"No course mail{about} in the last few days."
+        return (
+            f"Read {scanned} message{'s' if scanned != 1 else ''} from the "
+            f"allowlist. Nothing{about} needs anything from you."
+        )
+
+    lines = [f"From your email — nothing saved, tell me if you want any of it kept:"]
+    for item in flagged:
+        bits = []
+        if item.course:
+            bits.append(item.course)
+        bits.append(item.summary)
+        if item.new_date:
+            bits.append(f"new date {_pretty_date(item.new_date)}")
+        lines.append("- " + " — ".join(bits))
+    return "\n".join(lines)
+
+
 def _handle_ask_clarification(
     conn: sqlite3.Connection, intent: ParsedIntent, now: datetime
 ) -> str:
@@ -387,6 +446,7 @@ HANDLERS = {
     JUST_CHAT: _handle_just_chat,
     CHECKIN_REPLY: _handle_checkin_reply,
     ASK_CLARIFICATION: _handle_ask_clarification,
+    CHECK_EMAIL: _handle_check_email,
 }
 
 
@@ -421,6 +481,7 @@ def handle_message(
     now: datetime | None = None,
     writer: Writer | None = None,
     upcoming_events: list[tuple[str, str]] | None = None,
+    email_lookup: Any = None,
 ) -> str:
     """Classify one message, run its handler, return the reply text.
 
@@ -430,6 +491,7 @@ def handle_message(
     moment = now or datetime.now()
     token = _WRITER.set(writer)
     events_token = _EVENTS.set(list(upcoming_events or []))
+    email_token = _EMAIL.set(email_lookup)
     try:
         intents = classifier.classify(
             message, build_context(conn, moment, upcoming_events=upcoming_events)
@@ -437,12 +499,14 @@ def handle_message(
     except Exception:
         _WRITER.reset(token)
         _EVENTS.reset(events_token)
+        _EMAIL.reset(email_token)
         raise
 
     for intent in intents:
         if intent.name not in HANDLERS:
             _WRITER.reset(token)
             _EVENTS.reset(events_token)
+            _EMAIL.reset(email_token)
             raise AssistantError(
                 E.INTENT_UNCLEAR,
                 "I got a response I don't know how to act on.",
@@ -457,6 +521,7 @@ def handle_message(
     finally:
         _WRITER.reset(token)
         _EVENTS.reset(events_token)
+        _EMAIL.reset(email_token)
 
 
 def _run_all(

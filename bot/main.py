@@ -82,6 +82,45 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+def _email_lookup(app: Application, conn: sqlite3.Connection):
+    """A callable the router can use to read the mailbox, or None if it can't.
+
+    None means email was never set up, and the reply says so. A callable that
+    returns scanned=None means it was set up and the read failed, which is a
+    different sentence: try again, rather than go and configure something.
+    """
+    settings: Settings = app.bot_data[KEY_SETTINGS]
+    if not (settings.gmail_imap_user and settings.gmail_app_password):
+        return None
+
+    def lookup():
+        try:
+            return _gather_email(app, conn)
+        except AssistantError as err:
+            log_error(err)
+            return [], None
+
+    return lookup
+
+
+async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Read course email on demand (plan Section 6).
+
+    Until now email only ever arrived inside the 07:30 brief. Asking about it
+    went to the query path, which sees only saved data - and no email is ever
+    saved - so it answered that there was nothing, every time.
+    """
+    app = context.application
+    conn = _db(context)
+    lookup = _email_lookup(app, conn)
+
+    async with _typing(update.effective_message):
+        reply = await asyncio.to_thread(router.run_email_check, lookup)
+        with _db_lock:
+            prefix = testmode.banner(conn)
+    await update.effective_message.reply_text(prefix + reply)
+
+
 async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """A quick end-to-end proof that Telegram, the DB, and config all work."""
     conn = _db(context)
@@ -227,7 +266,12 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         events = _remaining_today(settings, conn)
         # The classifier doubles as the Writer; answer_query needs prose.
         return router.handle_message(
-            conn, classifier, text, writer=classifier, upcoming_events=events
+            conn,
+            classifier,
+            text,
+            writer=classifier,
+            upcoming_events=events,
+            email_lookup=_email_lookup(context.application, conn),
         )
 
     # Off the event loop: the Anthropic SDK call is synchronous and would
@@ -403,6 +447,7 @@ What I do on my own
 Commands
   /recap     the brief again, rebuilt from current data
   /backlog   work set aside as overdue and low-stakes
+  /email     read course email now and say what matters in it
   /terms     re-read term dates and deadlines from your calendar
   /status    what's on file and what's working
   /quiet     silence the morning brief; /quiet evening for the check-in
@@ -904,6 +949,7 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.add_handler(CommandHandler("recap", cmd_recap, filters=owner_only))
     app.add_handler(CommandHandler("quiet", cmd_quiet, filters=owner_only))
     app.add_handler(CommandHandler("backlog", cmd_backlog, filters=owner_only))
+    app.add_handler(CommandHandler("email", cmd_email, filters=owner_only))
     app.add_handler(CommandHandler("help", cmd_help, filters=owner_only))
     app.add_handler(CommandHandler("terms", cmd_terms, filters=owner_only))
     app.add_handler(CommandHandler("teston", cmd_teston, filters=owner_only))

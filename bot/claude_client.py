@@ -14,6 +14,7 @@ from bot.errors import AssistantError, E
 from bot.intents import (
     ANSWER_QUERY,
     ASK_CLARIFICATION,
+    CHECK_EMAIL,
     CHECKIN_REPLY,
     INTENT_NAMES,
     INTENT_TOOLS,
@@ -162,7 +163,7 @@ REPLY_TIMEOUT_SECONDS = 40.0
 #: Intents that answer in prose, each costing a second model call. One message
 #: gets at most one of them: two questions asked together are one question, and
 #: running both would double a reply time that is already the main complaint.
-PROSE_INTENTS = frozenset({ANSWER_QUERY, CHECKIN_REPLY, JUST_CHAT})
+PROSE_INTENTS = frozenset({ANSWER_QUERY, CHECK_EMAIL, CHECKIN_REPLY, JUST_CHAT})
 
 
 def parse_tool_uses(blocks: list[Any]) -> list[ParsedIntent]:

@@ -24,6 +24,7 @@ ANSWER_QUERY = "answer_query"
 JUST_CHAT = "just_chat"
 CHECKIN_REPLY = "checkin_reply"
 ASK_CLARIFICATION = "ask_clarification"
+CHECK_EMAIL = "check_email"
 
 
 @dataclass(frozen=True)
@@ -278,6 +279,31 @@ INTENT_TOOLS: list[dict[str, Any]] = [
                 },
             },
             "required": ["question"],
+        },
+    },
+    {
+        "name": CHECK_EMAIL,
+        "description": (
+            "Read his course email now and say what in it matters. Use when he "
+            "asks about email at all — \"any important emails\", \"email "
+            "summary\", \"anything from my profs\", \"did the TA send "
+            "anything\".\n\n"
+            "This reads the mailbox live. Do not use answer_query for a "
+            "question about email: that path sees only what is already saved, "
+            "and no email is ever saved, so it will always answer that there "
+            "is nothing."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "course": {
+                    "type": "string",
+                    "description": (
+                        "Course code, if he asked about one course rather than "
+                        "all of them."
+                    ),
+                },
+            },
         },
     },
     {
