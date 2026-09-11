@@ -80,6 +80,24 @@ class ReadsTheMailboxTestCase(Base):
         self.assertIn("Oct 7", reply)
         self.assertNotIn("2026-10-07", reply)
 
+    def test_the_course_is_not_printed_twice(self) -> None:
+        """Live output read "PSYC 3265 - Memory (PSYC 3265) first class..."."""
+        item = FlaggedEmail(
+            kind="announcement",
+            summary="PSYC 3265 first class meets in Vari Hall B",
+            course="PSYC 3265",
+        )
+        reply = self.ask(lookup_of([item], 9))
+        self.assertEqual(reply.count("PSYC 3265"), 1)
+
+    def test_a_course_not_named_in_the_summary_is_still_prefixed(self) -> None:
+        item = FlaggedEmail(
+            kind="announcement", summary="lecture moved to Vari Hall B",
+            course="PSYC 3265",
+        )
+        reply = self.ask(lookup_of([item], 9))
+        self.assertIn("PSYC 3265", reply)
+
     def test_it_says_nothing_was_saved(self) -> None:
         """Section 6: he confirms before anything becomes a task."""
         reply = self.ask(lookup_of([DEADLINE], 9))

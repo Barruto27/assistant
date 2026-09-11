@@ -415,7 +415,9 @@ def run_email_check(lookup: Any, course: str | None = None) -> str:
     lines = [f"From your email — nothing saved, tell me if you want any of it kept:"]
     for item in flagged:
         bits = []
-        if item.course:
+        # The summary often names the course itself, and "PSYC 3265 - Memory
+        # (PSYC 3265) first class..." reads like a bug.
+        if item.course and item.course.lower() not in item.summary.lower():
             bits.append(item.course)
         bits.append(item.summary)
         if item.new_date:
