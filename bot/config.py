@@ -41,6 +41,7 @@ class Settings:
     owner_telegram_id: int
     anthropic_api_key: str | None
     claude_model: str
+    classify_model: str
     db_path: Path
     log_path: Path
     google_client_secrets: Path
@@ -86,6 +87,11 @@ def load_settings(*, require_anthropic: bool = False) -> Settings:
         owner_telegram_id=owner_id,
         anthropic_api_key=anthropic_key,
         claude_model=os.getenv("CLAUDE_MODEL", "").strip() or "claude-sonnet-5",
+        # Every message pays for a classification before anything else can
+        # happen, and it is a constrained tool call against a short prompt.
+        # Running it on a smaller model took ~2.8s off a ~10s reply.
+        classify_model=os.getenv("CLASSIFY_MODEL", "").strip()
+        or "claude-haiku-4-5-20251001",
         db_path=_path("DB_PATH", "db/assistant.sqlite3"),
         log_path=_path("LOG_PATH", "logs/assistant.log"),
         google_client_secrets=_path(

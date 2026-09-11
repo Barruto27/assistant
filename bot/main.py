@@ -12,13 +12,14 @@ OWNER_TELEGRAM_ID; other senders are logged and ignored without a reply.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import sqlite3
 import threading
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from telegram import Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import (
     Application,
     ApplicationBuilder,
@@ -50,6 +51,8 @@ from db import database
 KEY_SETTINGS = "settings"
 KEY_DB = "db"
 KEY_CLASSIFIER = "classifier"
+KEY_CONFLICTS = "conflicts"
+KEY_CONFLICT_AT = "conflict_at"
 
 # The Claude call is blocking, so it runs in a worker thread. This lock keeps two
 # messages from interleaving their DB transactions while it does.
@@ -96,9 +99,26 @@ async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     parsing = "on" if context.application.bot_data.get(KEY_CLASSIFIER) else "OFF (no API key)"
     banner = testmode.banner(conn)
     rows = "\n".join(f"  {name}: {n}" for name, n in counts.items())
+
+    # A second process polling the same token no longer sends a message of its
+    # own, so this is where it surfaces.
+    conflicts = context.application.bot_data.get(KEY_CONFLICTS, 0)
+    warning = ""
+    if conflicts:
+        last = context.application.bot_data.get(KEY_CONFLICT_AT)
+        when = f" (last {last:%b %d, %H:%M})" if last else ""
+        plural = "s" if conflicts != 1 else ""
+        warning = (
+            f"<b>Another copy of me is running</b>{when}\n"
+            f"Telegram reported {conflicts} polling conflict{plural} since I "
+            "started. Stop the bot on any other machine - whichever instance "
+            "grabs a message first is the one that answers it.\n\n"
+        )
+
     await update.effective_message.reply_text(
         (f"<b>{banner}/testoff discards everything since it started</b>\n\n"
          if banner else "")
+        + warning
         + f"<b>Schema</b> v{version}\n"
         f"<b>Message parsing</b> {parsing}\n"
         f"<b>Semester start</b> {semester_start}\n"
@@ -152,6 +172,37 @@ def _remaining_today(settings: Settings, conn: sqlite3.Connection) -> list:
     return remaining
 
 
+#: Telegram shows "typing..." for about five seconds per call, so it has to be
+#: repeated to cover a longer wait.
+_TYPING_REFRESH_SECONDS = 4.0
+
+
+@contextlib.asynccontextmanager
+async def _typing(message):
+    """Hold the typing indicator for as long as the block runs.
+
+    A reply takes several seconds — a classification and then, for a question,
+    a second call to write the answer. Without this the chat looks dead for the
+    whole of it and the natural response is to send the message again.
+    """
+
+    async def keep_typing() -> None:
+        while True:
+            try:
+                await message.reply_chat_action(ChatAction.TYPING)
+            except Exception:  # noqa: BLE001 - cosmetic; never fail the reply
+                return
+            await asyncio.sleep(_TYPING_REFRESH_SECONDS)
+
+    task = asyncio.create_task(keep_typing())
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Classify one message, run its handler, reply with the receipt."""
     classifier = context.application.bot_data.get(KEY_CLASSIFIER)
@@ -175,9 +226,10 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 
     # Off the event loop: the Anthropic SDK call is synchronous and would
     # otherwise stall every other update while it waits.
-    reply = await asyncio.to_thread(work)
-    with _db_lock:
-        prefix = testmode.banner(conn)
+    async with _typing(update.effective_message):
+        reply = await asyncio.to_thread(work)
+        with _db_lock:
+            prefix = testmode.banner(conn)
     await update.effective_message.reply_text(prefix + reply)
 
 
@@ -204,22 +256,23 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
         return
 
-    await message.chat.send_action("typing")
-    telegram_file = await document.get_file()
-    pdf_bytes = bytes(await telegram_file.download_as_bytearray())
+    async with _typing(message):
+        telegram_file = await document.get_file()
+        pdf_bytes = bytes(await telegram_file.download_as_bytearray())
 
-    conn = _db(context)
+        conn = _db(context)
 
-    def work() -> str:
-        from anthropic import Anthropic
+        def work() -> str:
+            from anthropic import Anthropic
 
-        client = Anthropic(api_key=settings.anthropic_api_key)
-        extracted = syl.extract(pdf_bytes, client, settings.claude_model)
-        with _db_lock:
-            counts = syl.ingest(conn, extracted)
-        return syl.receipt(extracted, counts)
+            client = Anthropic(api_key=settings.anthropic_api_key)
+            extracted = syl.extract(pdf_bytes, client, settings.claude_model)
+            with _db_lock:
+                counts = syl.ingest(conn, extracted)
+            return syl.receipt(extracted, counts)
 
-    await message.reply_text(await asyncio.to_thread(work))
+        reply = await asyncio.to_thread(work)
+    await message.reply_text(reply)
 
 
 async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -238,27 +291,28 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
         return
 
-    await message.chat.send_action("typing")
-    # Telegram sends several sizes; the last is the largest.
-    photo = message.photo[-1]
-    telegram_file = await photo.get_file()
-    data = bytes(await telegram_file.download_as_bytearray())
-    caption = message.caption or ""
-    conn = _db(context)
+    async with _typing(message):
+        # Telegram sends several sizes; the last is the largest.
+        photo = message.photo[-1]
+        telegram_file = await photo.get_file()
+        data = bytes(await telegram_file.download_as_bytearray())
+        caption = message.caption or ""
+        conn = _db(context)
 
-    def work() -> str:
-        from anthropic import Anthropic
+        def work() -> str:
+            from anthropic import Anthropic
 
-        client = Anthropic(api_key=settings.anthropic_api_key)
-        course, items = image_reader.extract(
-            data, caption, client, settings.claude_model
-        )
-        if items:
-            with _db_lock:
-                image_reader.ingest(conn, course, items)
-        return image_reader.receipt(course, items)
+            client = Anthropic(api_key=settings.anthropic_api_key)
+            course, items = image_reader.extract(
+                data, caption, client, settings.claude_model
+            )
+            if items:
+                with _db_lock:
+                    image_reader.ingest(conn, course, items)
+            return image_reader.receipt(course, items)
 
-    await message.reply_text(await asyncio.to_thread(work))
+        reply = await asyncio.to_thread(work)
+    await message.reply_text(reply)
 
 
 async def on_unhandled(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -646,6 +700,14 @@ async def job_poll_reminders(context: ContextTypes.DEFAULT_TYPE) -> None:
             continue  # leave it unsent so the next tick retries
         with _db_lock:
             repo.mark_reminder_sent(conn, reminder["id"])
+        # "Did my reminder go out?" is the first thing the log gets asked, and
+        # a successful send used to leave no trace at all.
+        logger.info(
+            "Reminder %d sent (due %s): %r",
+            reminder["id"],
+            reminder["fire_at"],
+            reminder["text"][:60],
+        )
 
 
 def _is_transient(err: BaseException | None) -> bool:
@@ -659,6 +721,19 @@ def _is_transient(err: BaseException | None) -> bool:
     from telegram.error import NetworkError, TimedOut
 
     return isinstance(err, (NetworkError, TimedOut))
+
+
+def _is_duplicate_instance(err: BaseException | None) -> bool:
+    """True when a second process is polling Telegram with the same token.
+
+    Conflict descends straight from TelegramError, not NetworkError, so it fell
+    past the transient check and went out as "Something broke on my end."
+    Unlike a blip it does not clear on its own — but the running bot keeps
+    working, so it belongs in /status rather than in a message at 3am.
+    """
+    from telegram.error import Conflict
+
+    return isinstance(err, Conflict)
 
 
 async def job_token_check(context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -720,6 +795,21 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
         logger.warning("[%s] Transient network error: %s", E.TRANSIENT_NETWORK, err)
         return
 
+    if _is_duplicate_instance(err):
+        # Another process is polling with the same token — usually a copy left
+        # running on the laptop. The server recovers on its own, so this is a
+        # thing to notice, not a thing to be woken for: two of these arrived as
+        # "Something broke on my end" at 02:49 and 03:27.
+        seen = context.application.bot_data.get(KEY_CONFLICTS, 0) + 1
+        context.application.bot_data[KEY_CONFLICTS] = seen
+        context.application.bot_data[KEY_CONFLICT_AT] = datetime.now()
+        logger.warning(
+            "[%s] Another bot instance is polling the same token (%d since start)",
+            E.DUPLICATE_INSTANCE,
+            seen,
+        )
+        return
+
     if isinstance(err, AssistantError):
         log_error(err)
         user_text = err.user_message()
@@ -773,7 +863,9 @@ def build_application(settings: Settings, conn: sqlite3.Connection) -> Applicati
     app.bot_data[KEY_DB] = conn
     if settings.anthropic_api_key:
         app.bot_data[KEY_CLASSIFIER] = AnthropicClient(
-            settings.anthropic_api_key, settings.claude_model
+            settings.anthropic_api_key,
+            settings.claude_model,
+            classify_model=settings.classify_model,
         )
     else:
         logger.warning("ANTHROPIC_API_KEY not set - message parsing is disabled.")
