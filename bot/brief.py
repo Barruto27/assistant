@@ -66,6 +66,10 @@ class BriefContext:
     #: Email findings. Surfaced only — Section 6 is explicit that nothing is
     #: written to tasks until Kaan confirms.
     flagged_emails: list[FlaggedEmail] = field(default_factory=list)
+    #: How many messages were read from the allowlist, or None if email was
+    #: never checked. Nothing flagged and nothing checked produced the same
+    #: empty section, so a quiet mailbox looked exactly like a broken one.
+    emails_scanned: int | None = None
     #: Count of set-aside work, only when a weekly mention is due. None the
     #: rest of the time, because a daily count of things he has already decided
     #: not to do is the nagging the backlog rule exists to prevent.
@@ -106,6 +110,7 @@ def assemble(
     calendar_token: Path | None = None,
     calendar_secrets: Path | None = None,
     flagged_emails: list[FlaggedEmail] | None = None,
+    emails_scanned: int | None = None,
 ) -> BriefContext:
     """Gather the facts. Never raises for an unavailable subsystem.
 
@@ -117,6 +122,7 @@ def assemble(
     tomorrow = today + timedelta(days=1)
     context = BriefContext(now=now, week_number=repo.week_number(conn, today))
     context.flagged_emails = list(flagged_emails or [])
+    context.emails_scanned = emails_scanned
 
     context.goals = repo.active_goals(conn)
     context.gym_split = repo.gym_split_for(conn, today.weekday())
@@ -281,6 +287,19 @@ def render_facts(context: BriefContext) -> str:
         "FLAGGED IN EMAIL (not saved - Kaan confirms before anything is written)",
         [item.line() for item in context.flagged_emails],
     )
+    if context.emails_scanned is not None and not context.flagged_emails:
+        # None means email was never checked, and there is nothing honest to
+        # say about it. A count - zero included - means it was.
+        section(
+            "EMAIL CHECKED, NOTHING IN IT (say so in a few words, so silence "
+            "here reads as checked rather than broken)",
+            [
+                f"read {context.emails_scanned} message(s) from the allowlist, "
+                "none of them needed anything"
+                if context.emails_scanned
+                else "no mail from the allowlist in the last few days"
+            ],
+        )
     section(
         "GOALS WITH NO REPORTED MOVEMENT (mention one, lightly, as a question "
         "rather than a prod - and only if the day is not already full)",
@@ -365,7 +384,9 @@ Then, in this order, skipping anything with no facts:
 7. Carried-over reminders
 8. The rest of the week: non-lecture events, upcoming deadlines, course topics
 9. Anything flagged in email — say plainly that it came from an email and is
-   not saved yet, so he can confirm it
+   not saved yet, so he can confirm it. If instead the facts say email was
+   checked and held nothing, say that in a short clause rather than omitting
+   it; he needs to be able to tell a quiet mailbox from a broken one.
 10. What to prep for tomorrow
 
 Formatting: this is a Telegram message. Short lines, no markdown headers, no

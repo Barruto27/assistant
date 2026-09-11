@@ -264,12 +264,22 @@ FLAG_SYSTEM = """\
 You are reading a student's course email to find the few messages that actually
 change what he has to do.
 
-Flag: deadline changes, class or lab cancellations, newly assigned work, and
-announcements with a concrete action or date.
+Flag anything that changes what he has to do, or what he believes he has to
+do:
+
+- deadline changes, class or lab cancellations, room or time changes
+- newly assigned work, and announcements carrying a concrete action or date
+- corrections and clarifications, including something turning out NOT to be
+  required, or not to be graded, or to be handed in differently than expected.
+  A message that removes work counts as much as one that adds it - he cannot
+  act on what he never hears.
 
 Do not flag: routine reminders about work he already knows about, reading
-postings, general course chatter, administrative newsletters, marketing, or
-anything with no date and no action.
+postings, general course chatter with nothing to act on, administrative
+newsletters, campus events, marketing, or anything with no date and no action.
+
+A welcome message is chatter. A welcome message that names a room and a time
+is an announcement with a concrete date.
 
 Work only from the emails given. Never infer a date that isn't stated. If
 nothing qualifies, return an empty list — that is the common and correct

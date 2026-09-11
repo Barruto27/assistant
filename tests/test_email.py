@@ -226,5 +226,81 @@ class BriefIntegrationTestCase(unittest.TestCase):
         self.assertEqual(count, 0)
 
 
+class QuietMailboxTestCase(unittest.TestCase):
+    """Nothing flagged must not look the same as nothing working.
+
+    The Sep 11 brief carried no email section at all. It had read nine
+    messages and flagged none, so the section rendered empty and vanished -
+    and Kaan reasonably asked whether email was working.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = database.connect(Path(self._tmp.name) / "t.sqlite3")
+        database.migrate(self.conn)
+        database.set_config(self.conn, "semester_start_date", "2026-09-08")
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def facts(self, **kwargs) -> str:
+        context = brief.assemble(
+            self.conn, now=datetime(2026, 9, 11, 7, 30), **kwargs
+        )
+        return brief.render_facts(context)
+
+    def test_checked_and_empty_says_it_was_checked(self) -> None:
+        facts = self.facts(flagged_emails=[], emails_scanned=9)
+        self.assertIn("EMAIL CHECKED", facts)
+        self.assertIn("9", facts)
+
+    def test_never_checked_says_nothing(self) -> None:
+        """No credentials, no allowlist: there is nothing honest to report."""
+        facts = self.facts(flagged_emails=[], emails_scanned=None)
+        self.assertNotIn("EMAIL CHECKED", facts)
+
+    def test_nothing_in_the_window_still_counts_as_checked(self) -> None:
+        """Zero read is a result. Only None means it never ran."""
+        facts = self.facts(flagged_emails=[], emails_scanned=0)
+        self.assertIn("EMAIL CHECKED", facts)
+        self.assertIn("no mail from the allowlist", facts)
+
+    def test_something_flagged_replaces_the_quiet_line(self) -> None:
+        flagged = [
+            er.FlaggedEmail(
+                kind="deadline_change",
+                summary="A1 moved to Oct 3",
+                course="DATT 1200",
+                new_date="2026-10-03",
+            )
+        ]
+        facts = self.facts(flagged_emails=flagged, emails_scanned=9)
+        self.assertIn("FLAGGED IN EMAIL", facts)
+        self.assertIn("A1 moved to Oct 3", facts)
+        self.assertNotIn("EMAIL CHECKED", facts)
+
+
+class FlagCriteriaTestCase(unittest.TestCase):
+    """What the prompt asks to be flagged.
+
+    A DATT 1200 announcement said the Week 1 version sheet "is not an
+    assignment and it is not submitted for marks". Nothing in the old criteria
+    covered a message that takes work away rather than adding it, and it went
+    unflagged.
+    """
+
+    def test_work_that_turns_out_not_to_be_required_is_named(self) -> None:
+        self.assertIn("NOT", er.FLAG_SYSTEM)
+        self.assertIn("removes work", er.FLAG_SYSTEM)
+
+    def test_chatter_is_still_excluded(self) -> None:
+        self.assertIn("Do not flag", er.FLAG_SYSTEM)
+        self.assertIn("marketing", er.FLAG_SYSTEM)
+
+    def test_the_prompt_still_forbids_inventing_a_date(self) -> None:
+        self.assertIn("Never infer a date", er.FLAG_SYSTEM)
+
+
 if __name__ == "__main__":
     unittest.main()

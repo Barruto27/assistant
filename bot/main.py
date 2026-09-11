@@ -498,8 +498,16 @@ async def cmd_quiet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
-def _gather_email(app: Application, conn: sqlite3.Connection) -> list:
-    """Fetch and flag course email. Returns [] rather than raising.
+def _gather_email(
+    app: Application, conn: sqlite3.Connection
+) -> tuple[list, int | None]:
+    """Fetch and flag course email, and say how many were read.
+
+    Returns (flagged, scanned). ``scanned`` is None when email was never
+    checked - no credentials, no allowlist, no API key - and a count otherwise,
+    including zero. The brief needs that distinction: nine messages read and
+    none worth flagging used to render exactly like a mailbox that never
+    connected, which is what made Kaan ask whether email was working at all.
 
     Kept out of brief.assemble because flagging needs a Claude call and stage 1
     stays free of those. Failures are logged and reported as an unavailable
@@ -507,12 +515,12 @@ def _gather_email(app: Application, conn: sqlite3.Connection) -> list:
     """
     settings: Settings = app.bot_data[KEY_SETTINGS]
     if not (settings.gmail_imap_user and settings.gmail_app_password):
-        return []
+        return [], None
 
     with _db_lock:
         senders = email_reader.known_senders(conn)
     if not senders:
-        return []
+        return [], None
 
     messages = email_reader.fetch(
         host=settings.gmail_imap_host,
@@ -521,16 +529,20 @@ def _gather_email(app: Application, conn: sqlite3.Connection) -> list:
         senders=senders,
         since=email_reader.default_window(),
     )
-    if not messages or not settings.anthropic_api_key:
-        return []
+    if not settings.anthropic_api_key:
+        return [], None
+    if not messages:
+        return [], 0
 
     from anthropic import Anthropic
 
-    return email_reader.flag(
+    flagged = email_reader.flag(
         messages,
         Anthropic(api_key=settings.anthropic_api_key, timeout=60.0, max_retries=1),
         settings.claude_model,
     )
+    logger.info("Flagged %d of %d email(s)", len(flagged), len(messages))
+    return flagged, len(messages)
 
 
 def _build_brief(app: Application) -> str:
@@ -540,9 +552,10 @@ def _build_brief(app: Application) -> str:
     writer = app.bot_data.get(KEY_CLASSIFIER)
 
     flagged: list = []
+    scanned: int | None = None
     email_failed = False
     try:
-        flagged = _gather_email(app, conn)
+        flagged, scanned = _gather_email(app, conn)
     except AssistantError as err:
         log_error(err)
         email_failed = True
@@ -565,6 +578,7 @@ def _build_brief(app: Application) -> str:
             calendar_token=token if token.exists() else None,
             calendar_secrets=settings.google_client_secrets,
             flagged_emails=flagged,
+            emails_scanned=scanned,
         )
     if email_failed:
         context.unavailable.append("email")
