@@ -18,7 +18,7 @@ from bot import checkin as checkin_mod, query, repository as repo
 from contextvars import ContextVar
 
 from bot.claude_client import Classifier, PromptContext, Writer
-from bot.errors import AssistantError, E, logger
+from bot.errors import AssistantError, E, log_error, logger
 from bot.formatting import pct
 from bot.voice import VOICE
 from bot.intents import (
@@ -288,9 +288,23 @@ def _handle_checkin_reply(
     )
     result = checkin_mod.parse_reply(payload, offered)
     counts = checkin_mod.apply(conn, result, now=now)
-    checkin_mod.clear(conn)
+
+    # Retire only what he actually answered for. The rest stays offered, so a
+    # follow-up a minute later is still a check-in reply and not small talk.
+    answered = {
+        *result.done, *result.started, *result.attended,
+        *(task_id for task_id, _ in result.not_done),
+    }
+    checkin_mod.resolve(conn, answered, now=now)
 
     logger.info("Check-in reply applied: %s", counts)
+    if not answered:
+        # Nothing matched a row he was offered, so nothing was written. Saying
+        # "Recorded." here is how the bot came to confirm writes it never made.
+        return result.reply or (
+            "Nothing there matched what I asked about, so I haven't changed "
+            "anything. Name the task and I'll mark it."
+        )
     return result.reply or "Recorded."
 
 
@@ -360,7 +374,7 @@ def handle_message(
     token = _WRITER.set(writer)
     events_token = _EVENTS.set(list(upcoming_events or []))
     try:
-        intent = classifier.classify(
+        intents = classifier.classify(
             message, build_context(conn, moment, upcoming_events=upcoming_events)
         )
     except Exception:
@@ -368,17 +382,59 @@ def handle_message(
         _EVENTS.reset(events_token)
         raise
 
-    handler = HANDLERS.get(intent.name)
-    if handler is None:
-        raise AssistantError(
-            E.INTENT_UNCLEAR,
-            "I got a response I don't know how to act on.",
-            trigger=f"{intent.name}: {message}",
-        )
+    for intent in intents:
+        if intent.name not in HANDLERS:
+            _WRITER.reset(token)
+            _EVENTS.reset(events_token)
+            raise AssistantError(
+                E.INTENT_UNCLEAR,
+                "I got a response I don't know how to act on.",
+                trigger=f"{intent.name}: {message}",
+            )
 
-    logger.info("Intent %s for message %r", intent.name, message)
+    logger.info(
+        "Intent(s) %s for message %r", ", ".join(i.name for i in intents), message
+    )
     try:
-        return handler(conn, intent, moment)
+        return _run_all(conn, intents, moment, message)
     finally:
         _WRITER.reset(token)
         _EVENTS.reset(events_token)
+
+
+def _run_all(
+    conn: sqlite3.Connection,
+    intents: list[ParsedIntent],
+    moment: datetime,
+    message: str,
+) -> str:
+    """Run each intent in turn and stitch the receipts into one reply.
+
+    One failure does not discard the rest. "Remind me today and tomorrow to
+    upload the forms" is two writes, and losing the second silently — which is
+    what taking only the first intent used to do — is the failure mode worth
+    engineering against. If one leg fails he sees which, and the other still
+    happened.
+    """
+    if len(intents) == 1:
+        return HANDLERS[intents[0].name](conn, intents[0], moment)
+
+    replies: list[str] = []
+    failures = 0
+    for intent in intents:
+        try:
+            reply = HANDLERS[intent.name](conn, intent, moment)
+        except AssistantError as err:
+            failures += 1
+            log_error(err)
+            reply = err.user_message()
+        if reply and reply.strip():
+            replies.append(reply.strip())
+
+    if failures == len(intents):
+        raise AssistantError(
+            E.INTENT_UNCLEAR,
+            "None of that went through.",
+            trigger=message,
+        )
+    return "\n".join(replies)

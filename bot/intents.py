@@ -173,7 +173,12 @@ INTENT_TOOLS: list[dict[str, Any]] = [
         "name": UPDATE_TASK,
         "description": (
             "Change an existing task: mark it done or started, move its due date, "
-            "or change its priority."
+            "or change its priority.\n\n"
+            "This is also how Kaan reports finished work, and he reports it as a "
+            "statement rather than an order: 'iclicker done in class', "
+            "'finished the CMDS check-in', 'handed the essay in', 'did the "
+            "reading'. Telling you something happened is telling you to record "
+            "it. None of those are questions, and none of them are small talk."
         ),
         "input_schema": {
             "type": "object",
@@ -243,7 +248,11 @@ INTENT_TOOLS: list[dict[str, Any]] = [
         "name": ANSWER_QUERY,
         "description": (
             "Kaan is asking about his own data — what is due, what is on today, how "
-            "much a thing is worth. Read-only; nothing is saved."
+            "much a thing is worth. Read-only; nothing is saved.\n\n"
+            "He is asking, not telling. If he states that something is finished, "
+            "started, or skipped, that is update_task — this tool cannot change "
+            "anything, so choosing it here leaves his work unrecorded while the "
+            "reply talks about it."
         ),
         "input_schema": {
             "type": "object",

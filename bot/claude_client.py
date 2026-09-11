@@ -11,7 +11,15 @@ from datetime import datetime
 from typing import Any, Protocol
 
 from bot.errors import AssistantError, E
-from bot.intents import ASK_CLARIFICATION, INTENT_NAMES, INTENT_TOOLS, ParsedIntent
+from bot.intents import (
+    ANSWER_QUERY,
+    ASK_CLARIFICATION,
+    CHECKIN_REPLY,
+    INTENT_NAMES,
+    INTENT_TOOLS,
+    JUST_CHAT,
+    ParsedIntent,
+)
 from bot.voice import VOICE
 
 WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
@@ -80,29 +88,39 @@ class PromptContext:
 SYSTEM_PROMPT = """\
 {voice}
 
-Your job right now is narrow: read one message from Kaan and call exactly one
-tool that captures what he wants. You are not replying to him — a separate step
-writes the reply. Call a tool; do not write prose.
+Your job right now is narrow: read one message from Kaan and call the tools
+that capture what he wants. You are not replying to him — a separate step
+writes the reply. Call tools; do not write prose.
 
 {context}
 
 Rules:
-- Call exactly one tool, always.
+- Always call at least one tool.
+- One message often holds more than one instruction, and each one gets its own
+  tool call. "Remind me today and tomorrow to upload the forms" is two
+  reminders. "Add the essay for Friday and remind me tonight to start it" is a
+  task and a reminder. Do not drop the second half, and do not fold two
+  different things into one call.
+- Call a tool once per distinct thing he wants. Do not split a single
+  instruction into several calls, and do not repeat the same call.
 - Fill in every field you can reasonably infer. A missing detail you can default
   sensibly is not a reason to ask.
 - Resolve all relative dates and times against the current date and time above.
 - Prefer a confident write over a question. ask_clarification exists for the
   case where a wrong guess would save bad data he might not notice — most often
-  two courses that both fit. Use it sparingly.
-- One message can only be one intent. If he mentions several things, pick the
-  one he is actually asking you to act on.
+  two courses that both fit. Use it sparingly, and on its own.
+- A message reporting that something is finished — "iclicker done in class",
+  "handed in the essay" — is update_task, even when no check-in is open. Telling
+  you something happened is an instruction to record it, not small talk.
 """
 
 
 class Classifier(Protocol):
-    """Anything that can turn a message into a ParsedIntent."""
+    """Anything that can turn a message into the intents it contains."""
 
-    def classify(self, message: str, context: PromptContext) -> ParsedIntent: ...
+    def classify(
+        self, message: str, context: PromptContext
+    ) -> list[ParsedIntent]: ...
 
 
 class Writer(Protocol):
@@ -123,31 +141,79 @@ def build_system_prompt(context: PromptContext) -> str:
     return SYSTEM_PROMPT.format(voice=VOICE, context=context.render())
 
 
-def parse_tool_use(blocks: list[Any]) -> ParsedIntent:
-    """Pull the tool call out of a Claude response.
+#: Upper bound on how many things one message may ask for. Sized for a full
+#: week of gym split, which is a legitimate seven instructions because
+#: set_gym_split takes one weekday per call; anything past that is the model
+#: fragmenting a single instruction. A cap that truncates is the same silent
+#: data loss this change exists to remove, so it is set above the real ceiling
+#: rather than at it.
+MAX_INTENTS = 8
+
+#: Intents that answer in prose, each costing a second model call. One message
+#: gets at most one of them: two questions asked together are one question, and
+#: running both would double a reply time that is already the main complaint.
+PROSE_INTENTS = frozenset({ANSWER_QUERY, CHECKIN_REPLY, JUST_CHAT})
+
+
+def parse_tool_uses(blocks: list[Any]) -> list[ParsedIntent]:
+    """Pull every tool call out of a Claude response, in order.
+
+    A message can hold more than one instruction — "remind me today and
+    tomorrow" is two reminders — and taking only the first silently dropped the
+    rest.
 
     Shared by the real client and the fake so both fail the same way on a
     response with no tool call.
     """
+    intents: list[ParsedIntent] = []
+    seen: set[tuple[str, str]] = set()
     for block in blocks:
-        if getattr(block, "type", None) == "tool_use":
-            name = block.name
-            if name not in INTENT_NAMES:
-                raise AssistantError(
-                    E.CLAUDE, f"Claude called an unknown tool {name!r}."
-                )
-            return ParsedIntent(name=name, fields=dict(block.input or {}))
+        if getattr(block, "type", None) != "tool_use":
+            continue
+        name = block.name
+        if name not in INTENT_NAMES:
+            raise AssistantError(E.CLAUDE, f"Claude called an unknown tool {name!r}.")
+        fields = dict(block.input or {})
+        # The same call twice is the model repeating itself, not Kaan asking
+        # twice; acting on it would double-write.
+        key = (name, repr(sorted(fields.items(), key=lambda kv: kv[0])))
+        if key in seen:
+            continue
+        seen.add(key)
+        intents.append(ParsedIntent(name=name, fields=fields))
 
-    # No tool call. Treat as unclassifiable rather than inventing an intent.
-    return ParsedIntent(
-        name=ASK_CLARIFICATION,
-        fields={
-            "question": (
-                "Not sure what to do with that — task, reminder, or just chatting?"
-            ),
-            "reason": "intent_unclear",
-        },
+    if not intents:
+        # No tool call. Treat as unclassifiable rather than inventing an intent.
+        return [
+            ParsedIntent(
+                name=ASK_CLARIFICATION,
+                fields={
+                    "question": (
+                        "Not sure what to do with that — task, reminder, or just "
+                        "chatting?"
+                    ),
+                    "reason": "intent_unclear",
+                },
+            )
+        ]
+
+    # A question is an answer to the whole message, not one item in a list.
+    clarification = next(
+        (i for i in intents if i.name == ASK_CLARIFICATION), None
     )
+    if clarification is not None:
+        return [clarification]
+
+    kept: list[ParsedIntent] = []
+    prose_seen = False
+    for intent in intents:
+        if intent.name in PROSE_INTENTS:
+            if prose_seen:
+                continue
+            prose_seen = True
+        kept.append(intent)
+
+    return kept[:MAX_INTENTS]
 
 
 class AnthropicClient:
@@ -157,21 +223,35 @@ class AnthropicClient:
     (plain prose, for the morning brief).
     """
 
-    def __init__(self, api_key: str, model: str, *, max_tokens: int = 1024) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        *,
+        max_tokens: int = 1024,
+        classify_model: str | None = None,
+    ) -> None:
         from anthropic import Anthropic
 
         self._client = Anthropic(api_key=api_key)
         self._model = model
+        # Classification is a constrained tool call against a short prompt, and
+        # it sits in front of every single message. On Sonnet it cost ~2.8s of
+        # the ~10s Kaan was waiting; a smaller model does the same job in a
+        # fraction of that. Prose still goes to the full model.
+        self._classify_model = classify_model or model
         self._max_tokens = max_tokens
 
-    def classify(self, message: str, context: PromptContext) -> ParsedIntent:
+    def classify(self, message: str, context: PromptContext) -> list[ParsedIntent]:
         try:
             response = self._client.messages.create(
-                model=self._model,
+                model=self._classify_model,
                 max_tokens=self._max_tokens,
                 system=build_system_prompt(context),
                 tools=INTENT_TOOLS,
-                tool_choice={"type": "any"},  # force a tool call, never prose
+                # "any" forces a tool call and never prose, while still allowing
+                # several when the message holds several instructions.
+                tool_choice={"type": "any"},
                 messages=[{"role": "user", "content": message}],
             )
         except Exception as exc:  # noqa: BLE001 — SDK raises a family of errors
@@ -179,7 +259,7 @@ class AnthropicClient:
                 E.CLAUDE, _explain(exc), cause=exc, trigger=message
             ) from exc
 
-        return parse_tool_use(response.content)
+        return parse_tool_uses(response.content)
 
     def call_tool(
         self, system: str, user: str, tool: dict, *, max_tokens: int = 1024

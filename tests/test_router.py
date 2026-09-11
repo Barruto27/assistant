@@ -12,7 +12,12 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from bot import repository as repo  # noqa: E402
 from bot import router  # noqa: E402
-from bot.claude_client import PromptContext, _explain, parse_tool_use  # noqa: E402
+from bot.claude_client import (  # noqa: E402
+    MAX_INTENTS,
+    PromptContext,
+    _explain,
+    parse_tool_uses,
+)
 from bot.errors import AssistantError, E, setup_logging  # noqa: E402
 from bot.intents import INTENT_NAMES, ParsedIntent  # noqa: E402
 from db import database  # noqa: E402
@@ -390,23 +395,108 @@ class ResponseParsingTestCase(unittest.TestCase):
     """The real client's unpacking of an Anthropic response."""
 
     def test_extracts_the_tool_call(self) -> None:
-        intent = parse_tool_use(
+        intents = parse_tool_uses(
             [
                 FakeTextBlock(text="Let me record that."),
                 FakeToolUseBlock(name="add_task", input={"title": "Essay"}),
             ]
         )
-        self.assertEqual(intent.name, "add_task")
-        self.assertEqual(intent.get("title"), "Essay")
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].name, "add_task")
+        self.assertEqual(intents[0].get("title"), "Essay")
+
+    def test_every_tool_call_is_kept(self) -> None:
+        """"Remind me today and tomorrow" used to lose the second reminder."""
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(name="add_reminder", input={"text": "forms",
+                                                             "fire_at": "2026-09-10 19:00:00"}),
+                FakeToolUseBlock(name="add_reminder", input={"text": "forms",
+                                                             "fire_at": "2026-09-11 09:00:00"}),
+            ]
+        )
+        self.assertEqual([i.name for i in intents], ["add_reminder", "add_reminder"])
+        self.assertNotEqual(intents[0].get("fire_at"), intents[1].get("fire_at"))
+
+    def test_an_identical_repeated_call_is_dropped(self) -> None:
+        """Two of the same write is the model stuttering, not two instructions."""
+        same = {"title": "Essay", "course": "CMDS 1630"}
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(name="add_task", input=dict(same)),
+                FakeToolUseBlock(name="add_task", input=dict(same)),
+            ]
+        )
+        self.assertEqual(len(intents), 1)
+
+    def test_a_question_answers_the_whole_message_alone(self) -> None:
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(name="add_task", input={"title": "Essay"}),
+                FakeToolUseBlock(
+                    name="ask_clarification",
+                    input={"question": "Which course?", "reason": "ambiguous_course"},
+                ),
+            ]
+        )
+        self.assertEqual([i.name for i in intents], ["ask_clarification"])
+
+    def test_the_number_of_intents_is_capped(self) -> None:
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(name="add_task", input={"title": f"Essay {n}"})
+                for n in range(MAX_INTENTS + 4)
+            ]
+        )
+        self.assertEqual(len(intents), MAX_INTENTS)
+
+    def test_a_whole_week_of_gym_split_survives_the_cap(self) -> None:
+        """set_gym_split takes one weekday per call, so a week is seven."""
+        week = ["Push", "Pull", "Legs", "Rest", "Push", "Pull", "Rest"]
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(
+                    name="set_gym_split",
+                    input={"day_of_week": day, "split_name": name},
+                )
+                for day, name in enumerate(week)
+            ]
+        )
+        self.assertEqual(len(intents), 7, "Saturday and Sunday must not be dropped")
+        self.assertEqual([i.get("split_name") for i in intents], week)
+
+    def test_only_one_intent_may_answer_in_prose(self) -> None:
+        """Each of these costs a second model call; two would double the wait."""
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(name="answer_query", input={"question": "due today"}),
+                FakeToolUseBlock(name="answer_query", input={"question": "due tomorrow"}),
+                FakeToolUseBlock(name="just_chat", input={"message": "feeling behind"}),
+            ]
+        )
+        self.assertEqual([i.name for i in intents], ["answer_query"])
+
+    def test_a_prose_intent_still_rides_along_with_writes(self) -> None:
+        intents = parse_tool_uses(
+            [
+                FakeToolUseBlock(name="answer_query", input={"question": "due today"}),
+                FakeToolUseBlock(
+                    name="add_reminder",
+                    input={"text": "start it", "fire_at": "2026-09-11 19:00:00"},
+                ),
+            ]
+        )
+        self.assertEqual([i.name for i in intents], ["answer_query", "add_reminder"])
 
     def test_no_tool_call_becomes_a_clarification(self) -> None:
-        intent = parse_tool_use([FakeTextBlock(text="I'm not sure.")])
-        self.assertEqual(intent.name, "ask_clarification")
-        self.assertEqual(intent.get("reason"), "intent_unclear")
+        intents = parse_tool_uses([FakeTextBlock(text="I'm not sure.")])
+        self.assertEqual(len(intents), 1)
+        self.assertEqual(intents[0].name, "ask_clarification")
+        self.assertEqual(intents[0].get("reason"), "intent_unclear")
 
     def test_unknown_tool_name_raises(self) -> None:
         with self.assertRaises(AssistantError) as ctx:
-            parse_tool_use([FakeToolUseBlock(name="launch_missiles", input={})])
+            parse_tool_uses([FakeToolUseBlock(name="launch_missiles", input={})])
         self.assertEqual(ctx.exception.code, E.CLAUDE)
 
     def test_empty_optional_fields_fall_back_to_defaults(self) -> None:

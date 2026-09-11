@@ -15,17 +15,23 @@ from bot.intents import ParsedIntent
 
 
 class ScriptedClassifier:
-    """Returns queued intents in order, recording the contexts it was given."""
+    """Returns queued intents in order, recording the contexts it was given.
 
-    def __init__(self, *intents: ParsedIntent) -> None:
+    One queue entry is one message. Pass a list as an entry to script a message
+    that holds several instructions, the way "remind me today and tomorrow"
+    does.
+    """
+
+    def __init__(self, *intents: ParsedIntent | list[ParsedIntent]) -> None:
         self._queue = list(intents)
         self.calls: list[tuple[str, PromptContext]] = []
 
-    def classify(self, message: str, context: PromptContext) -> ParsedIntent:
+    def classify(self, message: str, context: PromptContext) -> list[ParsedIntent]:
         self.calls.append((message, context))
         if not self._queue:
             raise AssertionError("ScriptedClassifier ran out of queued intents")
-        return self._queue.pop(0)
+        entry = self._queue.pop(0)
+        return list(entry) if isinstance(entry, list) else [entry]
 
 
 class ExplodingClassifier:
@@ -34,7 +40,7 @@ class ExplodingClassifier:
     def __init__(self, error: BaseException) -> None:
         self._error = error
 
-    def classify(self, message: str, context: PromptContext) -> ParsedIntent:
+    def classify(self, message: str, context: PromptContext) -> list[ParsedIntent]:
         raise self._error
 
 

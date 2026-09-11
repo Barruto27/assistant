@@ -217,6 +217,12 @@ Only use task ids from the list below. If he mentions something not on it,
 leave it out of the id fields rather than guessing which row he meant — a wrong
 id quietly corrupts his record of the term.
 
+Match on what the item actually is, not on it being the only row left. Most of
+what he says in an evening will be about things that are not on this list at
+all — a reminder, an errand, something he just did. The right answer then is to
+record nothing and say so. Attaching his reason for skipping one thing to an
+unrelated row is worse than leaving the list untouched.
+
 Record a reason only if he gave one. Do not infer one, and do not ask for one.
 Something not done is information, not a failing.
 
@@ -351,3 +357,19 @@ def pending(conn: sqlite3.Connection, now: datetime) -> set[int] | None:
 def clear(conn: sqlite3.Connection) -> None:
     set_config(conn, "checkin_sent_at", "")
     set_config(conn, "checkin_task_ids", "")
+
+
+def resolve(conn: sqlite3.Connection, answered: set[int], *, now: datetime) -> None:
+    """Retire the rows he just answered for, and leave the rest offered.
+
+    An evening answer arrives in pieces — "skipped the GED thing", then a
+    minute later "iClicker done in class". Closing the check-in on the first
+    message sent the second one down the read-only chat path, which replied
+    that both attendance marks were recorded and recorded neither. Whatever is
+    still unanswered stays open until the window in ``pending`` runs out.
+    """
+    outstanding = (pending(conn, now) or set()) - answered
+    if not outstanding:
+        clear(conn)
+        return
+    set_config(conn, "checkin_task_ids", ",".join(str(i) for i in sorted(outstanding)))
