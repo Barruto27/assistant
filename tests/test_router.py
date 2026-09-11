@@ -14,6 +14,8 @@ from bot import repository as repo  # noqa: E402
 from bot import router  # noqa: E402
 from bot.claude_client import (  # noqa: E402
     MAX_INTENTS,
+    REPLY_TIMEOUT_SECONDS,
+    AnthropicClient,
     PromptContext,
     _explain,
     parse_tool_uses,
@@ -543,6 +545,34 @@ class ApiErrorMessageTestCase(unittest.TestCase):
             _explain(self._Status("connection reset")),
             "Couldn't reach Claude to read that.",
         )
+
+    def test_a_timeout_says_nothing_was_saved(self) -> None:
+        class APITimeoutError(Exception):
+            pass
+
+        explained = _explain(APITimeoutError("timed out"))
+        self.assertIn("too long", explained)
+        self.assertIn("Nothing was saved", explained)
+
+
+class CallBoundsTestCase(unittest.TestCase):
+    """A slow Claude call must not be able to freeze the bot.
+
+    The SDK default is a 600s read timeout with two retries. That call runs
+    while the worker thread holds the database lock, so half an hour of it
+    means no reminders fire and no message is answered. One request went quiet
+    for three and a half minutes on Sep 11 with the API otherwise healthy.
+    """
+
+    def test_the_client_bounds_every_call(self) -> None:
+        client = AnthropicClient("sk-not-a-real-key", "claude-sonnet-5")
+        self.assertEqual(client._client.timeout, REPLY_TIMEOUT_SECONDS)
+        self.assertEqual(client._client.max_retries, 1)
+
+    def test_the_bound_leaves_room_for_the_slowest_real_call(self) -> None:
+        """The morning brief, measured at about eight seconds."""
+        self.assertGreaterEqual(REPLY_TIMEOUT_SECONDS, 30)
+        self.assertLess(REPLY_TIMEOUT_SECONDS, 120)
 
 
 if __name__ == "__main__":

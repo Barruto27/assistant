@@ -149,6 +149,16 @@ def build_system_prompt(context: PromptContext) -> str:
 #: rather than at it.
 MAX_INTENTS = 8
 
+#: How long any one Claude call may take before it is given up on.
+#:
+#: The SDK default is a 600s read timeout with two retries, so a wedged request
+#: can hang for thirty minutes - and it hangs holding the database lock, which
+#: stops reminders firing and every other message being answered. One request
+#: really did go quiet for three and a half minutes on Sep 11 while the API was
+#: otherwise healthy. The slowest honest call measured is the morning brief at
+#: about eight seconds.
+REPLY_TIMEOUT_SECONDS = 40.0
+
 #: Intents that answer in prose, each costing a second model call. One message
 #: gets at most one of them: two questions asked together are one question, and
 #: running both would double a reply time that is already the main complaint.
@@ -230,10 +240,14 @@ class AnthropicClient:
         *,
         max_tokens: int = 1024,
         classify_model: str | None = None,
+        timeout: float = REPLY_TIMEOUT_SECONDS,
+        max_retries: int = 1,
     ) -> None:
         from anthropic import Anthropic
 
-        self._client = Anthropic(api_key=api_key)
+        self._client = Anthropic(
+            api_key=api_key, timeout=timeout, max_retries=max_retries
+        )
         self._model = model
         # Classification is a constrained tool call against a short prompt, and
         # it sits in front of every single message. On Sonnet it cost ~2.8s of
@@ -333,4 +347,9 @@ def _explain(exc: BaseException) -> str:
         return "That API key isn't allowed to use this model."
     if status == 429:
         return "Hit the Anthropic rate limit. Try again in a moment."
+    if type(exc).__name__ in ("APITimeoutError", "APIConnectionError"):
+        return (
+            "Claude took too long to answer that one. Nothing was saved - "
+            "send it again."
+        )
     return "Couldn't reach Claude to read that."

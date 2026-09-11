@@ -265,7 +265,9 @@ async def on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         def work() -> str:
             from anthropic import Anthropic
 
-            client = Anthropic(api_key=settings.anthropic_api_key)
+            client = Anthropic(
+                api_key=settings.anthropic_api_key, timeout=180.0, max_retries=1
+            )
             extracted = syl.extract(pdf_bytes, client, settings.claude_model)
             with _db_lock:
                 counts = syl.ingest(conn, extracted)
@@ -302,7 +304,9 @@ async def on_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         def work() -> str:
             from anthropic import Anthropic
 
-            client = Anthropic(api_key=settings.anthropic_api_key)
+            client = Anthropic(
+                api_key=settings.anthropic_api_key, timeout=120.0, max_retries=1
+            )
             course, items = image_reader.extract(
                 data, caption, client, settings.claude_model
             )
@@ -523,7 +527,9 @@ def _gather_email(app: Application, conn: sqlite3.Connection) -> list:
     from anthropic import Anthropic
 
     return email_reader.flag(
-        messages, Anthropic(api_key=settings.anthropic_api_key), settings.claude_model
+        messages,
+        Anthropic(api_key=settings.anthropic_api_key, timeout=60.0, max_retries=1),
+        settings.claude_model,
     )
 
 
