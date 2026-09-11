@@ -11,6 +11,7 @@ should cost one API call (principle 1).
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -183,6 +184,66 @@ def _handle_set_gym_split(conn: sqlite3.Connection, intent: ParsedIntent, now: d
     return f"{FULL_WEEKDAYS[day]} is {split}."
 
 
+#: "iClicker Participation (3/11)" -> the instalment number and the series.
+_INSTALMENT = re.compile(r"^(?P<base>.*?)\s*\((?P<n>\d+)\s*/\s*(?P<of>\d+)\)\s*$")
+
+
+def _series_key(row: sqlite3.Row) -> tuple[str, str] | None:
+    """(course, series title) for one instalment of weekly work, else None."""
+    match = _INSTALMENT.match(row["title"] or "")
+    if not match:
+        return None
+    return (row["course"] or "", match.group("base").strip().lower())
+
+
+def _instalment_number(row: sqlite3.Row) -> int:
+    match = _INSTALMENT.match(row["title"] or "")
+    return int(match.group("n")) if match else 0
+
+
+def _narrow(matches: list[sqlite3.Row], status: str | None) -> list[sqlite3.Row]:
+    """Drop what the report cannot be about, then collapse an ordered series.
+
+    Called only when several rows matched. Returns one row when the data
+    settles it, and the remaining candidates when it does not.
+    """
+    # A row already in the reported state is not what he is reporting.
+    if status:
+        open_rows = [row for row in matches if row["status"] != status]
+        if open_rows:
+            matches = open_rows
+    if len(matches) == 1:
+        return matches
+
+    # One series of numbered instalments: the one he means is the earliest
+    # still outstanding, because that is the next one he can have earned.
+    keys = {_series_key(row) for row in matches}
+    if len(keys) == 1 and None not in keys:
+        return [min(matches, key=_instalment_number)]
+
+    return matches
+
+
+def _ask_which(matches: list[sqlite3.Row]) -> str:
+    """The disambiguating question, asked at the level that is actually unclear.
+
+    When the candidates are several weeks of one series in two courses, the
+    open question is the course, not the week - so ask that.
+    """
+    courses = {row["course"] for row in matches if row["course"]}
+    series = {_series_key(row) for row in matches}
+    if len(courses) > 1 and len(series) == len(courses) and None not in series:
+        return "Which course — " + " or ".join(sorted(courses)) + "?"
+
+    listed = "; ".join(
+        f"{row['title']} ({row['course'] or 'no course'}"
+        + (f", due {_pretty_date(row['due_date'])}" if row["due_date"] else "")
+        + ")"
+        for row in matches[:4]
+    )
+    return f"Which one — {listed}?"
+
+
 def _handle_update_task(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
     query = intent.get("task_query")
     matches = repo.find_tasks(conn, query, course=intent.get("course"))
@@ -190,13 +251,9 @@ def _handle_update_task(conn: sqlite3.Connection, intent: ParsedIntent, now: dat
     if not matches:
         return f"Nothing on file matching {query!r}."
     if len(matches) > 1:
-        listed = "; ".join(
-            f"{row['title']} ({row['course'] or 'no course'}"
-            + (f", due {_pretty_date(row['due_date'])}" if row["due_date"] else "")
-            + ")"
-            for row in matches[:4]
-        )
-        return f"Which one — {listed}?"
+        matches = _narrow(matches, intent.get("status"))
+    if len(matches) > 1:
+        return _ask_which(matches)
 
     task = matches[0]
     changes = {

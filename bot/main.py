@@ -14,7 +14,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import sqlite3
-import threading
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
@@ -56,7 +55,11 @@ KEY_CONFLICT_AT = "conflict_at"
 
 # The Claude call is blocking, so it runs in a worker thread. This lock keeps two
 # messages from interleaving their DB transactions while it does.
-_db_lock = threading.Lock()
+# The same lock db.database.transaction() takes, so the coarse uses below and
+# the per-transaction ones cannot deadlock against each other. Reach for the
+# coarse form only when a whole sequence must be exclusive; a single write does
+# not need it, and holding it across a Claude call is what froze the bot.
+_db_lock = database.write_lock
 
 
 def _settings(context: ContextTypes.DEFAULT_TYPE) -> Settings:
@@ -217,12 +220,15 @@ async def on_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     settings = _settings(context)
 
     def work() -> str:
-        with _db_lock:
-            events = _remaining_today(settings, conn)
-            # The classifier doubles as the Writer; answer_query needs prose.
-            return router.handle_message(
-                conn, classifier, text, writer=classifier, upcoming_events=events
-            )
+        # No lock here on purpose. This runs a calendar fetch and one or two
+        # Claude calls; holding the database lock across them stopped reminders
+        # firing and every other message being answered for the duration. The
+        # writes underneath take it per transaction, which is all it was for.
+        events = _remaining_today(settings, conn)
+        # The classifier doubles as the Writer; answer_query needs prose.
+        return router.handle_message(
+            conn, classifier, text, writer=classifier, upcoming_events=events
+        )
 
     # Off the event loop: the Anthropic SDK call is synchronous and would
     # otherwise stall every other update while it waits.
@@ -560,26 +566,27 @@ def _build_brief(app: Application) -> str:
         log_error(err)
         email_failed = True
 
-    with _db_lock:
-        timezone = database.get_config(conn, "timezone", "America/Toronto")
-        # Triage before assembling, so the brief reflects today's view rather
-        # than yesterday's pile.
-        try:
-            backlog_rules.demote(conn)
-        except AssistantError as err:
-            log_error(err)
-        token = settings.google_token_personal
-        context = brief.assemble(
-            conn,
-            now=datetime.now(ZoneInfo(timezone)),
-            timezone=timezone,
-            latitude=settings.weather_latitude,
-            longitude=settings.weather_longitude,
-            calendar_token=token if token.exists() else None,
-            calendar_secrets=settings.google_client_secrets,
-            flagged_emails=flagged,
-            emails_scanned=scanned,
-        )
+    # Likewise unlocked: assemble fetches the calendar and the weather, and the
+    # reminder poll should not be stuck behind either.
+    timezone = database.get_config(conn, "timezone", "America/Toronto")
+    # Triage before assembling, so the brief reflects today's view rather
+    # than yesterday's pile.
+    try:
+        backlog_rules.demote(conn)
+    except AssistantError as err:
+        log_error(err)
+    token = settings.google_token_personal
+    context = brief.assemble(
+        conn,
+        now=datetime.now(ZoneInfo(timezone)),
+        timezone=timezone,
+        latitude=settings.weather_latitude,
+        longitude=settings.weather_longitude,
+        calendar_token=token if token.exists() else None,
+        calendar_secrets=settings.google_client_secrets,
+        flagged_emails=flagged,
+        emails_scanned=scanned,
+    )
     if email_failed:
         context.unavailable.append("email")
     return brief.generate(context, writer)

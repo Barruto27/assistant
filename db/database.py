@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
@@ -37,9 +38,9 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
 
     # check_same_thread=False because the bot runs the blocking Claude call in a
     # worker thread and touches the DB there. sqlite3.threadsafety is 3
-    # (serialized) so sharing the connection is safe at the driver level; callers
-    # that run explicit BEGIN/COMMIT must still serialize themselves so two
-    # transactions can't interleave (bot.main holds a lock for exactly this).
+    # (serialized) so sharing the connection is safe at the driver level; what
+    # is not safe is two explicit BEGIN/COMMIT blocks interleaving, and
+    # transaction() below takes write_lock for exactly that.
     conn = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
@@ -47,16 +48,29 @@ def connect(db_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
+#: Serialises explicit transactions on the shared connection.
+#:
+#: Reentrant because bot.main also takes it around the few sequences that must
+#: be exclusive as a whole - test mode swapping the database file under a live
+#: connection - and those call transaction() while already holding it.
+#:
+#: This is deliberately the narrowest thing that works. bot.main used to wrap
+#: whole message handling instead, which meant a Claude call held the lock and
+#: froze every job and every other message for as long as it ran.
+write_lock = threading.RLock()
+
+
 @contextmanager
 def transaction(conn: sqlite3.Connection) -> Iterator[sqlite3.Connection]:
     """Run a block in a transaction, rolling back on any exception."""
-    conn.execute("BEGIN")
-    try:
-        yield conn
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
-    conn.execute("COMMIT")
+    with write_lock:
+        conn.execute("BEGIN")
+        try:
+            yield conn
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+        conn.execute("COMMIT")
 
 
 def _discover_migrations(directory: Path | None = None) -> list[tuple[int, Path]]:
