@@ -11,7 +11,7 @@ import sqlite3
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from bot.errors import AssistantError, E
+from bot.errors import AssistantError, E, logger
 from db.database import get_config, transaction
 
 TS_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -240,6 +240,85 @@ def mark_reminder_sent(conn: sqlite3.Connection, reminder_id: int) -> None:
         "the reminder status",
     )
 
+
+
+# ---------------------------------------------------------------------------
+# Flagged email
+# ---------------------------------------------------------------------------
+
+#: How many times one flagged email may be put in front of him before it stops
+#: being raised: once in a morning brief, once in an evening check-in. Past
+#: that it is something he has seen and not acted on, which is a decision.
+MAX_RAISES = 2
+
+
+def remember_flagged(conn: sqlite3.Connection, flagged: list) -> list[tuple]:
+    """Record what a scan found. Returns (item, row id) for the new ones only.
+
+    The row id comes back so callers can mark exactly what they showed. Matching
+    them up again by summary text would be guesswork of the same kind that made
+    these unstorable in the first place.
+
+    Deduplicated on the source Message-ID, because the summary is written fresh
+    by the model every run - the same announcement came back worded three
+    different ways across three scans. A flag whose source could not be
+    identified has an empty id and is always treated as new, which is the
+    harmless direction: shown twice beats silently dropped.
+    """
+    new = []
+    with transaction(conn):
+        for item in flagged:
+            message_id = getattr(item, "message_id", "") or ""
+            if message_id:
+                seen = conn.execute(
+                    "SELECT 1 FROM flagged_emails WHERE message_id = ?",
+                    (message_id,),
+                ).fetchone()
+                if seen:
+                    continue
+            cursor = conn.execute(
+                "INSERT INTO flagged_emails (message_id, kind, summary, course, "
+                "new_date, sender) VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    message_id,
+                    item.kind,
+                    item.summary,
+                    item.course,
+                    item.new_date,
+                    item.sender,
+                ),
+            )
+            new.append((item, cursor.lastrowid))
+    if new:
+        logger.info("Recorded %d new flagged email(s)", len(new))
+    return new
+
+
+def outstanding_flagged(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Flagged mail still worth putting in front of him."""
+    return _read(
+        conn,
+        "SELECT * FROM flagged_emails WHERE status != 'closed' "
+        "AND times_raised < ? ORDER BY first_seen",
+        (MAX_RAISES,),
+    )
+
+
+def mark_flagged_raised(conn: sqlite3.Connection, ids: list[int]) -> None:
+    """Count one showing. At MAX_RAISES the row stops being offered."""
+    if not ids:
+        return
+    placeholders = ",".join("?" for _ in ids)
+    _write(
+        conn,
+        f"UPDATE flagged_emails SET times_raised = times_raised + 1, "
+        f"status = CASE WHEN times_raised + 1 >= {MAX_RAISES} THEN 'closed' "
+        f"ELSE 'raised' END, "
+        f"last_raised = strftime('%Y-%m-%d %H:%M:%S', 'now', 'localtime') "
+        f"WHERE id IN ({placeholders})",
+        tuple(ids),
+        "the flagged email",
+    )
 
 # ---------------------------------------------------------------------------
 # Gym, goals, notes

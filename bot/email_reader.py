@@ -18,6 +18,7 @@ as flagged items in the brief, and Kaan confirms before anything is saved.
 from __future__ import annotations
 
 import email
+import hashlib
 import imaplib
 import re
 from dataclasses import dataclass
@@ -44,6 +45,9 @@ class Email:
     received: datetime | None
     body: str
     course_label: str | None = None
+    #: RFC 5322 Message-ID, or a digest standing in for one. Stable across
+    #: fetches, which the model's wording of a flag is not.
+    message_id: str = ""
 
     def summary(self) -> str:
         when = f"{self.received:%Y-%m-%d %H:%M}" if self.received else "unknown date"
@@ -51,6 +55,20 @@ class Email:
         if self.course_label:
             head += f" | course: {self.course_label}"
         return f"{head}\n{self.body}"
+
+
+def _message_id(message: Message, sender: str, subject: str, received) -> str:
+    """The Message-ID header, or a digest that behaves like one.
+
+    Only used to recognise the same email on a later scan, so it has to be
+    stable rather than unguessable.
+    """
+    raw = (message.get("Message-ID") or "").strip()
+    if raw:
+        return raw
+    stamp = received.isoformat() if received else ""
+    digest = hashlib.sha256(f"{sender}|{subject}|{stamp}".encode()).hexdigest()
+    return f"<digest:{digest[:32]}>"
 
 
 def _decode(raw: str | None) -> str:
@@ -190,13 +208,16 @@ def fetch(
                 received = email.utils.parsedate_to_datetime(message.get("Date", ""))
             except (TypeError, ValueError):
                 received = None
+            sender = _decode(message.get("From"))
+            subject = _decode(message.get("Subject")) or "(no subject)"
             results.append(
                 Email(
-                    sender=_decode(message.get("From")),
-                    subject=_decode(message.get("Subject")) or "(no subject)",
+                    sender=sender,
+                    subject=subject,
                     received=received,
                     body=_extract_body(message),
                     course_label=found[uid],
+                    message_id=_message_id(message, sender, subject, received),
                 )
             )
     except AssistantError:
@@ -251,8 +272,15 @@ FLAG_TOOL: dict[str, Any] = {
                             "description": "YYYY-MM-DD if a date is being set or moved.",
                         },
                         "sender": {"type": "string", "description": "Who sent it."},
+                        "source": {
+                            "type": "integer",
+                            "description": (
+                                "The number in brackets above the email this came "
+                                "from. Required, and must be one of the numbers shown."
+                            ),
+                        },
                     },
-                    "required": ["kind", "summary"],
+                    "required": ["kind", "summary", "source"],
                 },
             }
         },
@@ -296,6 +324,9 @@ class FlaggedEmail:
     course: str | None = None
     new_date: str | None = None
     sender: str | None = None
+    #: Which email this came from, so the same one is recognised on a later
+    #: scan instead of being raised again as though it were new.
+    message_id: str = ""
 
     def line(self) -> str:
         bits = [self.kind.replace("_", " ")]
@@ -312,7 +343,9 @@ def flag(emails: list[Email], client: Any, model: str, *, today: date | None = N
     if not emails:
         return []
 
-    joined = "\n\n---\n\n".join(message.summary() for message in emails)
+    joined = "\n\n---\n\n".join(
+        f"[{n}]\n{message.summary()}" for n, message in enumerate(emails, 1)
+    )
     try:
         response = client.messages.create(
             model=model,
@@ -329,18 +362,39 @@ def flag(emails: list[Email], client: Any, model: str, *, today: date | None = N
 
     for block in response.content:
         if getattr(block, "type", None) == "tool_use" and block.name == "flag_items":
-            return [
-                FlaggedEmail(
-                    kind=str(raw.get("kind", "announcement")),
-                    summary=str(raw["summary"]).strip(),
-                    course=raw.get("course") or None,
-                    new_date=raw.get("new_date") or None,
-                    sender=raw.get("sender") or None,
+            flagged = []
+            for raw in (block.input or {}).get("items", []):
+                if not str(raw.get("summary", "")).strip():
+                    continue
+                flagged.append(
+                    FlaggedEmail(
+                        kind=str(raw.get("kind", "announcement")),
+                        summary=str(raw["summary"]).strip(),
+                        course=raw.get("course") or None,
+                        new_date=raw.get("new_date") or None,
+                        sender=raw.get("sender") or None,
+                        message_id=_source_id(raw.get("source"), emails),
+                    )
                 )
-                for raw in (block.input or {}).get("items", [])
-                if str(raw.get("summary", "")).strip()
-            ]
+            return flagged
     return []
+
+
+def _source_id(source: Any, emails: list[Email]) -> str:
+    """Resolve the model's 1-based index back to a Message-ID.
+
+    An out-of-range or missing index leaves the id empty rather than pointing
+    at the wrong email: an unidentified flag is still shown, it just cannot be
+    remembered between scans.
+    """
+    try:
+        index = int(source)
+    except (TypeError, ValueError):
+        return ""
+    if 1 <= index <= len(emails):
+        return emails[index - 1].message_id
+    logger.warning("Flag cited email %r, which is not in the %d scanned", source, len(emails))
+    return ""
 
 
 def default_window(days: int = 3) -> date:

@@ -603,10 +603,17 @@ def _build_brief(app: Application) -> str:
     writer = app.bot_data.get(KEY_CLASSIFIER)
 
     flagged: list = []
+    flagged_ids: list[int] = []
     scanned: int | None = None
     email_failed = False
     try:
-        flagged, scanned = _gather_email(app, conn)
+        found, scanned = _gather_email(app, conn)
+        # Only the ones not already recorded reach the brief. Without this the
+        # same announcement is news again every morning until it ages out of
+        # the three-day scan window.
+        recorded = repo.remember_flagged(conn, found)
+        flagged = [item for item, _ in recorded]
+        flagged_ids = [row_id for _, row_id in recorded]
     except AssistantError as err:
         log_error(err)
         email_failed = True
@@ -634,7 +641,12 @@ def _build_brief(app: Application) -> str:
     )
     if email_failed:
         context.unavailable.append("email")
-    return brief.generate(context, writer)
+
+    text = brief.generate(context, writer)
+    # Count the showing only once the brief exists. The evening check-in picks
+    # up whatever is left under the cap.
+    repo.mark_flagged_raised(conn, flagged_ids)
+    return text
 
 
 def _consume_nudges(app: Application) -> None:

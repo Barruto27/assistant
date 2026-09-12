@@ -29,6 +29,7 @@ from typing import Any
 
 from bot.errors import AssistantError, E, logger
 from bot.voice import VOICE
+from bot import repository as repo
 from db.database import get_config, set_config, transaction
 
 #: How long after the check-in a plain message is still read as a reply to it.
@@ -45,6 +46,10 @@ class CheckinContext:
     attendance_today: list[sqlite3.Row] = field(default_factory=list)
     due_tomorrow: list[sqlite3.Row] = field(default_factory=list)
     daily_goal: sqlite3.Row | None = None
+    #: Mail flagged since the last check-in that he has not been asked about.
+    #: Never a task - Section 6 keeps him in charge of what gets written - so
+    #: the check-in asks whether it needs to become one.
+    flagged_emails: list[sqlite3.Row] = field(default_factory=list)
 
 
 def gather(conn: sqlite3.Connection, now: datetime) -> CheckinContext:
@@ -69,6 +74,7 @@ def gather(conn: sqlite3.Connection, now: datetime) -> CheckinContext:
         "AND (due_date IS NULL OR due_date != ?) ORDER BY COALESCE(due_date, '9999')",
         (today,),
     ).fetchall()
+    context.flagged_emails = repo.outstanding_flagged(conn)
     context.due_tomorrow = conn.execute(
         "SELECT id, title, course, weight_pct FROM tasks "
         "WHERE status IN ('not_started', 'in_progress') AND due_date = ? "
@@ -93,6 +99,9 @@ def has_anything_to_ask(context: CheckinContext) -> bool:
         or context.in_progress
         or context.attendance_today
         or context.daily_goal
+        # A quiet day with unanswered mail is still worth a message: this is
+        # the last chance to raise it before the scan window drops it.
+        or context.flagged_emails
     )
 
 
@@ -134,6 +143,23 @@ def render_context(context: CheckinContext) -> str:
     block("ATTENDANCE MARK TODAY (only counts if he was there)", context.attendance_today)
     block("ALREADY MARKED IN PROGRESS", context.in_progress)
     block("DUE TOMORROW", context.due_tomorrow)
+
+    if context.flagged_emails:
+        lines.append("")
+        lines.append(
+            "FROM HIS EMAIL, NOT SAVED AND NOT A TASK (ask whether he wants any "
+            "of it kept; do not imply it is already tracked, and do not give it "
+            "an id - these are not rows he can mark done):"
+        )
+        for row in context.flagged_emails:
+            bits = []
+            if row["course"]:
+                bits.append(row["course"])
+            bits.append(row["summary"])
+            if row["new_date"]:
+                bits.append(f"date {row['new_date']}")
+            lines.append("- " + " | ".join(bits))
+
     if context.daily_goal:
         lines.append("")
         lines.append(f"TODAY'S GOAL: {context.daily_goal['text']}")

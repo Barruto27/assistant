@@ -384,14 +384,19 @@ Then, in this order, skipping anything with no facts:
 7. Carried-over reminders
 8. The rest of the week: non-lecture events, upcoming deadlines, course topics
 9. Anything flagged in email — say plainly that it came from an email and is
-   not saved yet, so he can confirm it. If instead the facts say email was
-   checked and held nothing, say that in a short clause rather than omitting
-   it; he needs to be able to tell a quiet mailbox from a broken one.
+   not saved yet, so he can confirm it. List every one of them: these are the
+   only items in the brief that exist nowhere else, and a flag you leave out to
+   save room is gone for good. A run that dropped a "syllabus quiz is now live"
+   to stay short cost him the one piece of real work in the whole message. If
+   instead the facts say email was checked and held nothing, say that in a
+   short clause rather than omitting it; he needs to be able to tell a quiet
+   mailbox from a broken one.
 10. What to prep for tomorrow
 
 Formatting: this is a Telegram message. Short lines, no markdown headers, no
 bold. A bare line of text for each section beats a label. Under 200 words unless
-the day genuinely has a lot in it. If something could not be reached, say so in
+the day genuinely has a lot in it — and email flags are never what you cut to
+get there. If something could not be reached, say so in
 a few words at the end rather than pretending the section was empty.
 """
 
