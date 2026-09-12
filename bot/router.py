@@ -379,11 +379,19 @@ def _handle_check_email(
     cannot disagree. Read-only: nothing here becomes a task, which the reply
     says outright rather than leaving him to assume either way.
     """
-    return run_email_check(_EMAIL.get(), intent.get("course"))
+    return run_email_check(_EMAIL.get(), intent.get("course"), conn=conn)
 
 
-def run_email_check(lookup: Any, course: str | None = None) -> str:
-    """Read the mailbox and describe it. Shared by check_email and /email."""
+def run_email_check(
+    lookup: Any, course: str | None = None, *, conn: sqlite3.Connection | None = None
+) -> str:
+    """Read the mailbox and describe it. Shared by check_email and /email.
+
+    What it finds is recorded, so mail he goes looking for himself reaches the
+    evening check-in the same way mail found by the brief does. Without that,
+    checking manually would quietly opt an email out of ever being raised
+    again.
+    """
     if lookup is None:
         return (
             "I can't read your email — no mailbox is set up for me. That's "
@@ -391,6 +399,8 @@ def run_email_check(lookup: Any, course: str | None = None) -> str:
         )
 
     flagged, scanned = lookup()
+    if conn is not None and flagged:
+        repo.remember_flagged(conn, flagged)
     if scanned is None:
         return (
             "I couldn't get into the mailbox just now. The morning brief will "

@@ -125,6 +125,35 @@ class ReadsTheMailboxTestCase(Base):
         self.assertNotIn("A1 moved", reply)
 
 
+class RecordingTestCase(Base):
+    """Mail he goes looking for must reach the check-in too."""
+
+    def test_an_on_demand_check_records_what_it_found(self) -> None:
+        from bot import repository as repo
+
+        item = FlaggedEmail(
+            kind="new_work", summary="Syllabus quiz is live",
+            course="CMDS 1630", message_id="<quiz@x>",
+        )
+        router.run_email_check(lookup_of([item], 9), conn=self.conn)
+        self.assertEqual(len(repo.outstanding_flagged(self.conn)), 1)
+
+    def test_it_does_not_record_the_same_email_twice(self) -> None:
+        from bot import repository as repo
+
+        item = FlaggedEmail(
+            kind="new_work", summary="Syllabus quiz is live",
+            course="CMDS 1630", message_id="<quiz@x>",
+        )
+        router.run_email_check(lookup_of([item], 9), conn=self.conn)
+        router.run_email_check(lookup_of([item], 9), conn=self.conn)
+        self.assertEqual(len(repo.outstanding_flagged(self.conn)), 1)
+
+    def test_without_a_connection_it_still_answers(self) -> None:
+        reply = router.run_email_check(lookup_of([DEADLINE], 9))
+        self.assertIn("A1 moved a week later", reply)
+
+
 class FailureTestCase(Base):
     def test_no_mailbox_configured_says_what_is_missing(self) -> None:
         reply = self.ask(None)

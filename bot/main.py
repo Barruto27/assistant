@@ -115,7 +115,9 @@ async def cmd_email(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     lookup = _email_lookup(app, conn)
 
     async with _typing(update.effective_message):
-        reply = await asyncio.to_thread(router.run_email_check, lookup)
+        reply = await asyncio.to_thread(
+            lambda: router.run_email_check(lookup, conn=conn)
+        )
         with _db_lock:
             prefix = testmode.banner(conn)
     await update.effective_message.reply_text(prefix + reply)
