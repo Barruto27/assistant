@@ -1,7 +1,10 @@
 .DS_Store
 .env
 *.sqlite
-*.sqlite3
+# The trailing glob matters: SQLite's -wal and -shm sidecars are not
+# matched by *.sqlite3, and both got committed once already. The -wal
+# happened to be empty that time; it holds real rows when it isn't.
+*.sqlite3*
 __pycache__/
 *.pyc
 .venv/
