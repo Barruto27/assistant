@@ -45,6 +45,10 @@ class PromptContext:
     #: "did the reflection, skipped the reading" routes there rather than
     #: being filed as a new task.
     checkin_pending: bool = False
+    #: A clarifying question the bot asked and is still waiting on, with the
+    #: half-built intent behind it. Without this, the answer to its own
+    #: question arrives as an unrelated message and it asks the other half.
+    open_question: Any = None
 
     def render(self) -> str:
         lines = [
@@ -71,6 +75,27 @@ class PromptContext:
         else:
             lines.append(
                 "No courses are on file yet, so accept whatever course label he uses."
+            )
+
+        if self.open_question is not None:
+            lines.append("")
+            lines.append(
+                f"You just asked him: {self.open_question.question!r}"
+            )
+            if self.open_question.fields:
+                lines.append(
+                    "You already had these details, and they still stand: "
+                    + ", ".join(
+                        f"{k}={v!r}" for k, v in self.open_question.fields.items()
+                    )
+                )
+            lines.append(
+                f"If this message answers that question, call "
+                f"{self.open_question.intent} and put the answer in the right "
+                "field - the details above get merged back in, so you only "
+                "need what he has just told you. If he has moved on to "
+                "something else, treat it as a new message and ignore the "
+                "question."
             )
 
         if self.checkin_pending:

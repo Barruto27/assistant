@@ -15,7 +15,7 @@ import re
 import sqlite3
 from datetime import datetime, timedelta
 
-from bot import checkin as checkin_mod, query, repository as repo
+from bot import checkin as checkin_mod, clarify, query, repository as repo
 from contextvars import ContextVar
 from typing import Any
 
@@ -90,22 +90,43 @@ def _pretty_time(raw: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
-def _ask(question: str, code: str) -> str:
+def _ask(
+    question: str,
+    code: str,
+    *,
+    conn: sqlite3.Connection | None = None,
+    intent: ParsedIntent | None = None,
+    now: datetime | None = None,
+) -> str:
     """A clarifying question, logged but not dressed up as a failure.
 
     Plan Section 4 wants a missing required field to produce one targeted
     question; Section 8's user-facing codes are for things that actually broke.
     These were using the second to do the first, so "remind me to buy milk"
     came back as "When should I remind you? (E103)".
+
+    Given the intent it could not complete, it also writes the question down,
+    so the next message is read as the answer rather than as a fresh request.
     """
     logger.info("[%s] Asking: %s", code, question)
+    if conn is not None and intent is not None:
+        clarify.remember(
+            conn,
+            intent=intent.name,
+            fields=dict(intent.fields),
+            question=question,
+            now=now or datetime.now(),
+        )
     return question
 
 
 def _handle_add_task(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
     title = intent.get("title")
     if not title:
-        return _ask("What should I call it?", E.MISSING_FIELD)
+        return _ask(
+            "What should I call it?", E.MISSING_FIELD,
+            conn=conn, intent=intent, now=now,
+        )
 
     course = intent.get("course")
     priority = int(intent.get("priority", 2))
@@ -154,6 +175,7 @@ def _handle_add_reminder(conn: sqlite3.Connection, intent: ParsedIntent, now: da
                     f"Nothing left on today's calendar tells me when {anchor!r} "
                     "is. Give me a time and I'll set it.",
                     E.MISSING_FIELD,
+                    conn=conn, intent=intent, now=now,
                 )
             fire_at, after_what = resolved
             repo.add_reminder(conn, text=text, fire_at=fire_at)
@@ -163,6 +185,7 @@ def _handle_add_reminder(conn: sqlite3.Connection, intent: ParsedIntent, now: da
         return _ask(
             "When should I remind you — tonight, tomorrow, or a specific time?",
             E.MISSING_FIELD,
+            conn=conn, intent=intent, now=now,
         )
 
     repo.add_reminder(conn, text=text, fire_at=fire_at)
@@ -200,7 +223,10 @@ def _resolve_anchor(now: datetime) -> tuple[str, str] | None:
 def _handle_set_gym_split(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
     split = intent.get("split_name")
     if not split:
-        return _ask("Which split — push, pull, legs, rest?", E.MISSING_FIELD)
+        return _ask(
+            "Which split — push, pull, legs, rest?", E.MISSING_FIELD,
+            conn=conn, intent=intent, now=now,
+        )
 
     raw = intent.get("day_of_week")
     try:
@@ -208,11 +234,15 @@ def _handle_set_gym_split(conn: sqlite3.Connection, intent: ParsedIntent, now: d
     except (TypeError, ValueError):
         # Used to be a bare int(None), which is a TypeError rather than an
         # AssistantError and so escaped as "Something broke on my end."
-        return _ask(f"Which day is {split} on?", E.MISSING_FIELD)
+        return _ask(
+            f"Which day is {split} on?", E.MISSING_FIELD,
+            conn=conn, intent=intent, now=now,
+        )
     if not 0 <= day <= 6:
         return _ask(
             f"Which day is {split} on? I read {raw!r}, which isn't a weekday.",
             E.MISSING_FIELD,
+            conn=conn, intent=intent, now=now,
         )
 
     repo.set_gym_split(conn, day_of_week=day, split_name=split)
@@ -301,6 +331,7 @@ def _handle_update_task(conn: sqlite3.Connection, intent: ParsedIntent, now: dat
             f"What should I change about {task['title']} — the date, the "
             "priority, or is it done?",
             E.MISSING_FIELD,
+            conn=conn, intent=intent, now=now,
         )
 
     repo.update_task(conn, task["id"], **changes)
@@ -476,6 +507,13 @@ def _handle_ask_clarification(
     reason = intent.get("reason", "intent_unclear")
     code = CLARIFICATION_CODES.get(reason, E.INTENT_UNCLEAR)
     logger.info("Clarification requested [%s]: %s", code, intent.get("question"))
+    clarify.remember(
+        conn,
+        intent=ASK_CLARIFICATION,
+        fields={},
+        question=str(intent.get("question", "")),
+        now=now,
+    )
     return intent.get(
         "question", "Not sure what to do with that — task, reminder, or just chatting?"
     )
@@ -516,6 +554,7 @@ def build_context(
         week_number=repo.week_number(conn, now.date()),
         upcoming_events=upcoming_events or [],
         checkin_pending=checkin_mod.pending(conn, now) is not None,
+        open_question=clarify.pending(conn, now),
     )
 
 
@@ -547,6 +586,20 @@ def handle_message(
         _EVENTS.reset(events_token)
         _EMAIL.reset(email_token)
         raise
+
+    # Fold in what was already known before the question was asked, then close
+    # it: whatever happens next, this exchange is over. A handler that asks
+    # again will write a fresh one.
+    open_question = clarify.pending(conn, moment)
+    if open_question is not None:
+        intents = [
+            ParsedIntent(
+                name=i.name,
+                fields=clarify.merge(open_question, i.name, dict(i.fields)),
+            )
+            for i in intents
+        ]
+        clarify.clear(conn)
 
     for intent in intents:
         if intent.name not in HANDLERS:
