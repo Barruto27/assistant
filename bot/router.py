@@ -400,7 +400,9 @@ def _handle_checkin_reply(
     if writer is None:
         return "Got it, but I can't record that right now — no Claude client."
 
-    offered = checkin_mod.pending(conn, now)
+    # Everything tonight offered, not just what is unanswered: he may be
+    # correcting something he already answered for.
+    offered = checkin_mod.addressable(conn, now)
     if not offered:
         return "Noted."
 
@@ -425,6 +427,14 @@ def _handle_checkin_reply(
     checkin_mod.resolve(conn, answered, now=now)
 
     logger.info("Check-in reply applied: %s", counts)
+    if counts.get("refused"):
+        # Never let the composed acknowledgement claim a write that was
+        # refused; that is the false-confirmation failure in miniature.
+        return (
+            "I didn't follow that one — an attendance mark is either earned or "
+            "not, so I can't mark one as started. Say which thing you mean and "
+            "I'll fix it."
+        )
     if not answered:
         # Nothing matched a row he was offered, so nothing was written. Saying
         # "Recorded." here is how the bot came to confirm writes it never made.
@@ -554,6 +564,8 @@ def build_context(
         week_number=repo.week_number(conn, now.date()),
         upcoming_events=upcoming_events or [],
         checkin_pending=checkin_mod.pending(conn, now) is not None,
+        checkin_offered=checkin_mod.offered(conn, now),
+        checkin_answered=checkin_mod.answered_already(conn, now),
         open_question=clarify.pending(conn, now),
     )
 

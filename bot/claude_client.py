@@ -45,6 +45,14 @@ class PromptContext:
     #: "did the reflection, skipped the reading" routes there rather than
     #: being filed as a new task.
     checkin_pending: bool = False
+    #: What tonight's check-in asked about and has not had an answer for.
+    #: A bare "a check-in is open" was not enough: without the rows, "made it
+    #: to the lecture" had nothing to attach to and went to just_chat.
+    checkin_offered: list[str] = field(default_factory=list)
+    #: Rows he has already answered for tonight. Still listed, because "wait
+    #: no I didn't" is about one of these, and dropping them made the
+    #: correction attach to whatever happened to be left.
+    checkin_answered: list[str] = field(default_factory=list)
     #: A clarifying question the bot asked and is still waiting on, with the
     #: half-built intent behind it. Without this, the answer to its own
     #: question arrives as an unrelated message and it asks the other half.
@@ -101,10 +109,40 @@ class PromptContext:
         if self.checkin_pending:
             lines.append("")
             lines.append(
-                "An evening check-in was sent and is still unanswered. A message "
-                "that reads as an answer to it - what he did or didn't get to - "
-                "is checkin_reply, not a new task."
+                "Tonight's evening check-in is open. It asked about these, and "
+                "these have not been answered for yet:"
             )
+            lines.extend(f"- {item}" for item in self.checkin_offered)
+            lines.append(
+                "Anything he says about one of those - did it, didn't, started "
+                "it, made it to the lecture, missed it, why - is checkin_reply. "
+                "That holds however it is phrased: a bare 'made it to the "
+                "lecture' is a checkin_reply, not small talk, and 'actually I "
+                "only started it' is a checkin_reply correcting an earlier "
+                "answer, not an update_task."
+            )
+            lines.append(
+                "checkin_reply is the only intent that knows which rows were "
+                "offered. update_task would go looking for the earliest match "
+                "in the whole database and can pick a different week; "
+                "just_chat and answer_query cannot write at all, so a report "
+                "routed there is silently lost."
+            )
+            lines.append(
+                "He may answer in pieces over several messages, and the open "
+                "list above shrinks as he does. If he has plainly moved on to "
+                "something else, treat that message normally."
+            )
+            if self.checkin_answered:
+                lines.append("")
+                lines.append("He has already answered for these tonight:")
+                lines.extend(f"- {item}" for item in self.checkin_answered)
+                lines.append(
+                    "A message that takes one of those back - \"wait no I "
+                    "didn't\", \"actually I only started it\" - is a "
+                    "checkin_reply about that row, not about whatever is still "
+                    "open. The last thing he said about a row is the true one."
+                )
 
         if self.upcoming_events:
             lines.append("")

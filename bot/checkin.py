@@ -54,6 +54,11 @@ class CheckinContext:
     #: Never a task - Section 6 keeps him in charge of what gets written - so
     #: the check-in asks whether it needs to become one.
     flagged_emails: list[sqlite3.Row] = field(default_factory=list)
+    #: Rows offered tonight that he has already answered for. They are no
+    #: longer outstanding, so nothing should ask about them again - but a
+    #: correction is about one of these, and the call that reads his reply
+    #: cannot resolve "wait no I didn't" against a row it cannot see.
+    answered_tonight: list[sqlite3.Row] = field(default_factory=list)
 
 
 def gather(conn: sqlite3.Connection, now: datetime) -> CheckinContext:
@@ -79,6 +84,20 @@ def gather(conn: sqlite3.Connection, now: datetime) -> CheckinContext:
         (today,),
     ).fetchall()
     context.flagged_emails = repo.outstanding_flagged(conn)
+
+    offered_ids = addressable(conn, now)
+    settled = [i for i in _ordered_ids(conn, _ANSWERED) if i in offered_ids]
+    if settled:
+        placeholders = ",".join("?" for _ in settled)
+        rows = {
+            row["id"]: row
+            for row in conn.execute(
+                f"SELECT id, title, course, status FROM tasks "
+                f"WHERE id IN ({placeholders})",
+                tuple(settled),
+            )
+        }
+        context.answered_tonight = [rows[i] for i in settled if i in rows]
     context.due_tomorrow = conn.execute(
         "SELECT id, title, course, weight_pct FROM tasks "
         "WHERE status IN ('not_started', 'in_progress') AND due_date = ? "
@@ -162,6 +181,22 @@ def render_context(context: CheckinContext) -> str:
     block("ATTENDANCE MARK TODAY (only counts if he was there)", context.attendance_today)
     block("ALREADY MARKED IN PROGRESS", context.in_progress)
     block("DUE TOMORROW", context.due_tomorrow)
+
+    if context.answered_tonight:
+        lines.append("")
+        lines.append(
+            "ALREADY ANSWERED FOR TONIGHT, oldest first (do not ask about these "
+            "again; they are here so a correction can name one):"
+        )
+        for position, row in enumerate(context.answered_tonight):
+            bits = [row["title"]]
+            if row["course"]:
+                bits.append(row["course"])
+            last = position == len(context.answered_tonight) - 1
+            marker = "  <- the last thing he told you about" if last else ""
+            lines.append(
+                f"- [{row['id']}] " + " | ".join(bits) + f" -> {row['status']}{marker}"
+            )
 
     if context.flagged_emails:
         lines.append("")
@@ -274,6 +309,16 @@ unrelated row is worse than leaving the list untouched.
 Record a reason only if he gave one. Do not infer one, and do not ask for one.
 Something not done is information, not a failing.
 
+He is allowed to take back what he said a minute ago. If a row appears under
+ALREADY ANSWERED FOR TONIGHT and this message contradicts it - "wait no I
+didn't", "actually I only started it", "sorry, I meant..." - the new answer is
+about that row and replaces the old one. Do not move the correction onto
+whatever is still outstanding; that records two wrong things instead of one.
+
+A message that opens by retracting - "wait", "no", "actually", "sorry" - and
+then names no row is about the last thing he told you about, which is marked
+in that list. It is not about whatever else happens to be open.
+
 {data}
 """
 
@@ -320,7 +365,7 @@ def apply(
     conn: sqlite3.Connection, result: CheckinResult, *, now: datetime
 ) -> dict[str, int]:
     """Write the reply to the database. Nothing here is destructive."""
-    counts = {"done": 0, "started": 0, "not_done": 0, "attended": 0}
+    counts = {"done": 0, "started": 0, "not_done": 0, "attended": 0, "refused": 0}
     try:
         with transaction(conn):
             for task_id in result.done + result.attended:
@@ -330,11 +375,28 @@ def apply(
             counts["done"] = len(result.done)
             counts["attended"] = len(result.attended)
 
+            # An attendance mark has no half-way state, so "started" against
+            # one means the wrong row was picked. Refusing beats recording a
+            # status he never reported against a lecture he never mentioned.
+            startable, misread = [], []
             for task_id in result.started:
+                row = conn.execute(
+                    "SELECT attendance FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                (misread if row and row["attendance"] else startable).append(task_id)
+            if misread:
+                logger.warning(
+                    "Refused to mark attendance mark(s) %s as started; an "
+                    "attendance mark is not something you can be part-way "
+                    "through, so this is a misidentified row",
+                    misread,
+                )
+            for task_id in startable:
                 conn.execute(
                     "UPDATE tasks SET status = 'in_progress' WHERE id = ?", (task_id,)
                 )
-            counts["started"] = len(result.started)
+            counts["started"] = len(startable)
+            counts["refused"] = len(misread)
 
             # Not-done stays open. The backlog rule decides when it stops being
             # shown; the check-in only records the reason he gave.
@@ -381,30 +443,96 @@ def apply(
 # ---------------------------------------------------------------------------
 
 
+#: Config keys. The offered set is written once and left alone; answering
+#: moves ids into the second list rather than out of the first, so a
+#: correction a minute later can still reach a row he has answered for.
+_SENT_AT = "checkin_sent_at"
+_OFFERED = "checkin_task_ids"
+_ANSWERED = "checkin_answered_ids"
+
+
 def mark_sent(conn: sqlite3.Connection, now: datetime, ids: list[int]) -> None:
     """Remember that a check-in is awaiting an answer, and which rows it offered."""
-    set_config(conn, "checkin_sent_at", now.strftime("%Y-%m-%d %H:%M:%S"))
-    set_config(conn, "checkin_task_ids", ",".join(str(i) for i in ids))
+    set_config(conn, _SENT_AT, now.strftime("%Y-%m-%d %H:%M:%S"))
+    set_config(conn, _OFFERED, ",".join(str(i) for i in ids))
+    set_config(conn, _ANSWERED, "")
 
 
-def pending(conn: sqlite3.Connection, now: datetime) -> set[int] | None:
-    """The ids a pending check-in offered, or None if none is outstanding."""
-    raw = get_config(conn, "checkin_sent_at", "")
+def _ordered_ids(conn: sqlite3.Connection, key: str) -> list[int]:
+    raw = get_config(conn, key, "") or ""
+    return [int(i) for i in raw.split(",") if i.strip().isdigit()]
+
+
+def _ids(conn: sqlite3.Connection, key: str) -> set[int]:
+    return set(_ordered_ids(conn, key))
+
+
+def _in_window(conn: sqlite3.Connection, now: datetime) -> bool:
+    raw = get_config(conn, _SENT_AT, "")
     if not raw:
-        return None
+        return False
     try:
         sent = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
     except ValueError:
+        return False
+    return (now.replace(tzinfo=None) - sent) <= timedelta(hours=REPLY_WINDOW_HOURS)
+
+
+def addressable(conn: sqlite3.Connection, now: datetime) -> set[int]:
+    """Every row tonight's check-in offered, answered or not.
+
+    What he is allowed to talk about, which is not the same as what still
+    needs asking: a correction is about something he has already answered for.
+    """
+    return _ids(conn, _OFFERED) if _in_window(conn, now) else set()
+
+
+def pending(conn: sqlite3.Connection, now: datetime) -> set[int] | None:
+    """The ids still waiting on an answer, or None if the check-in is done."""
+    if not _in_window(conn, now):
         return None
-    if (now.replace(tzinfo=None) - sent) > timedelta(hours=REPLY_WINDOW_HOURS):
-        return None
-    ids = get_config(conn, "checkin_task_ids", "") or ""
-    return {int(i) for i in ids.split(",") if i.strip().isdigit()}
+    outstanding = _ids(conn, _OFFERED) - _ids(conn, _ANSWERED)
+    return outstanding or None
+
+
+def offered(conn: sqlite3.Connection, now: datetime) -> list[str]:
+    """The still-open rows in words, for the parser to match his wording to.
+
+    A set of ids tells the parser nothing. "Made it to the lecture" only routes
+    correctly if it can see that one of the things it asked about is an
+    attendance mark for a lecture today.
+    """
+    ids = pending(conn, now)
+    if not ids:
+        return []
+    return _describe(conn, ids)
+
+
+def answered_already(conn: sqlite3.Connection, now: datetime) -> list[str]:
+    """Rows he has answered for tonight, in words, so a correction can land."""
+    ids = addressable(conn, now) & _ids(conn, _ANSWERED)
+    return _describe(conn, ids) if ids else []
+
+
+def _describe(conn: sqlite3.Connection, ids: set[int]) -> list[str]:
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT title, course, attendance FROM tasks WHERE id IN ({placeholders})",
+        tuple(sorted(ids)),
+    ).fetchall()
+    described = []
+    for row in rows:
+        label = f"{row['course']} {row['title']}" if row["course"] else row["title"]
+        if row["attendance"]:
+            label += " (an attendance mark - being there is the whole of it)"
+        described.append(label)
+    return described
 
 
 def clear(conn: sqlite3.Connection) -> None:
-    set_config(conn, "checkin_sent_at", "")
-    set_config(conn, "checkin_task_ids", "")
+    set_config(conn, _SENT_AT, "")
+    set_config(conn, _OFFERED, "")
+    set_config(conn, _ANSWERED, "")
 
 
 def resolve(conn: sqlite3.Connection, answered: set[int], *, now: datetime) -> None:
@@ -413,11 +541,17 @@ def resolve(conn: sqlite3.Connection, answered: set[int], *, now: datetime) -> N
     An evening answer arrives in pieces — "skipped the GED thing", then a
     minute later "iClicker done in class". Closing the check-in on the first
     message sent the second one down the read-only chat path, which replied
-    that both attendance marks were recorded and recorded neither. Whatever is
-    still unanswered stays open until the window in ``pending`` runs out.
+    that both attendance marks were recorded and recorded neither.
+
+    Answered rows are recorded rather than removed. Dropping them meant a
+    correction - "wait no I didn't, I started it" - found only whatever was
+    left offered and applied itself to that instead.
     """
-    outstanding = (pending(conn, now) or set()) - answered
-    if not outstanding:
-        clear(conn)
-        return
-    set_config(conn, "checkin_task_ids", ",".join(str(i) for i in sorted(outstanding)))
+    # Appended, not sorted: the order he answered in is what makes "wait, no"
+    # resolvable, and sorting by id discards it.
+    order = _ordered_ids(conn, _ANSWERED)
+    for task_id in sorted(answered):
+        if task_id in order:
+            order.remove(task_id)
+        order.append(task_id)
+    set_config(conn, _ANSWERED, ",".join(str(i) for i in order))
