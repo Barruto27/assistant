@@ -36,6 +36,7 @@ from bot import (
     image_reader,
     google_calendar,
     repository as repo,
+    quotes,
     router,
     syllabus as syl,
     term_dates,
@@ -643,6 +644,12 @@ def _build_brief(app: Application) -> str:
     )
     if email_failed:
         context.unavailable.append("email")
+
+    # Chosen after assembling, so the picker can see what kind of day it is,
+    # and before generating, because the brief opens with it. A failure here
+    # costs the opening line and nothing else.
+    if writer is not None:
+        context.quote = quotes.pick(conn, writer, context)
 
     text = brief.generate(context, writer)
     # Count the showing only once the brief exists. The evening check-in picks

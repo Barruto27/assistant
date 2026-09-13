@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
+from typing import Any
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -74,6 +75,10 @@ class BriefContext:
     #: rest of the time, because a daily count of things he has already decided
     #: not to do is the nagging the backlog rule exists to prevent.
     backlog_count: int | None = None
+    #: The quotation to open with, chosen by bot.quotes. None on any day the
+    #: pick failed or would have repeated, in which case the brief simply
+    #: starts with the date.
+    quote: Any = None
     #: True during the mid-term break, when a week number is the wrong
     #: thing to report.
     reading_week: bool = False
@@ -238,9 +243,14 @@ def _event_day(event: CalendarEvent) -> date:
 def render_facts(context: BriefContext) -> str:
     """The structured data block. Also the fallback brief if Claude is down."""
     today = context.now.date()
-    lines: list[str] = [
-        f"DATE: {WEEKDAYS[today.weekday()]}, {today:%B} {today.day}, {today.year}",
-    ]
+    lines: list[str] = []
+    if context.quote is not None:
+        lines.append("OPENING QUOTATION (use verbatim, on its own line):")
+        lines.append(context.quote.line())
+        lines.append("")
+    lines.append(
+        f"DATE: {WEEKDAYS[today.weekday()]}, {today:%B} {today.day}, {today.year}"
+    )
     if context.reading_week:
         lines.append("READING WEEK - no classes. Say so instead of a week number.")
     elif context.week_number is not None:
@@ -334,12 +344,18 @@ def render_plain(context: BriefContext) -> str:
     if context.week_number is not None:
         header += f" — week {context.week_number}"
     body = render_facts(context)
-    # Drop the DATE/WEEK lines the header already covers.
+    # Drop the DATE/WEEK lines the header already covers, and the quotation
+    # block: its label is an instruction to Claude, and this is the path taken
+    # when Claude is not there to read it.
+    quote_line = context.quote.line() if context.quote is not None else None
     body = "\n".join(
-        line for line in body.splitlines()
-        if not line.startswith(("DATE:", "SEMESTER WEEK:"))
+        line
+        for line in body.splitlines()
+        if not line.startswith(("DATE:", "SEMESTER WEEK:", "OPENING QUOTATION"))
+        and line != quote_line
     ).strip()
-    return f"{header}\n\n{body}" if body else header
+    opening = f"{quote_line}\n\n" if quote_line else ""
+    return f"{opening}{header}\n\n{body}" if body else f"{opening}{header}"
 
 
 BRIEF_SYSTEM = """\
@@ -349,28 +365,13 @@ You are writing Kaan's morning brief. Work only from the facts given — never
 invent a task, a date, an event, or a number. If a section has no facts, leave
 it out entirely rather than saying it is empty.
 
-Open with one line of your own that gives him a reason to get up and do today's
-version of the work. It is the first thing he reads in the morning, so it has
-to earn its place.
+Open with the quotation given under OPENING QUOTATION, on its own line,
+exactly as written and with the attribution. Do not comment on it, do not
+explain how it applies, and do not work its wording into the rest of the brief.
+It stands alone and the brief carries on beneath it.
 
-- Talk to him. Second person, present tense.
-- Make it about doing something, not about how things are. It should push.
-- Concrete beats abstract. If today turns on one thing - a lecture that carries
-  a mark for being there, a deadline that closes tonight - make the line about
-  that thing.
-- One sentence, around fifteen words.
-- Write a new one every day. Never a famous quotation, never attributed, never
-  in quotation marks.
-- Do not open with "Some weeks", "Some days", "There are days", or any other
-  throat-clearing about how things generally go, and do not tag an observation
-  onto the end to make it land ("- that's today", "and today is one of them").
-- No hedging, no wistfulness, no both-sides. If it would work printed over a
-  photo of a sunrise, write a different one.
-- It is its own line. Do not fold the date into it, and do not let it become a
-  summary of the week; the sections below already do that.
-- Vary how it opens. Not every one starts with "get up and" or "get to" - three
-  mornings of the same construction reads as nagging. What must not vary is
-  that it points at something real today.
+If no quotation is given, start with the date instead. Never invent one, and
+never substitute a line of your own.
 
 Then, in this order, skipping anything with no facts:
 1. Date and semester week
