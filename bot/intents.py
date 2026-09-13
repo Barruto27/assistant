@@ -110,8 +110,13 @@ INTENT_TOOLS: list[dict[str, Any]] = [
     {
         "name": ADD_REMINDER,
         "description": (
-            "Set a reminder to be sent back at a specific time. Use when Kaan asks "
-            "to be reminded, nudged, or told about something later."
+            "Set a reminder to be sent back later. Use when Kaan asks to be "
+            "reminded, nudged, or told about something.\n\n"
+            "A reminder is just text and a time. It has no course, so a course "
+            "it happens to mention never needs resolving - keep his wording. "
+            "If the time is missing, still use this tool and leave fire_at "
+            "empty; he gets asked when, which is the only thing actually "
+            "missing."
         ),
         "input_schema": {
             "type": "object",
@@ -347,7 +352,14 @@ INTENT_TOOLS: list[dict[str, Any]] = [
             "Use ONLY when the message cannot be resolved from context and a wrong "
             "guess would write bad data. Do not use for a missing detail you can "
             "reasonably default. Ask exactly one specific question naming the actual "
-            "options — never a generic 'can you clarify?'."
+            "options — never a generic 'can you clarify?'.\n\n"
+            "'ambiguous_course' is only for a course that is about to be stored, "
+            "which means a task. Nothing else has a course field, so on a "
+            "reminder, a note or a goal the course is just part of what he "
+            "said and needs no resolving.\n\n"
+            "Before asking, check the answer would change what gets written. A "
+            "question whose answer goes nowhere is worse than no question: it "
+            "costs him a round trip and buys nothing."
         ),
         "input_schema": {
             "type": "object",

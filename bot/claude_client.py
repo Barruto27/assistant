@@ -61,6 +61,13 @@ class PromptContext:
                 "use ask_clarification with reason 'ambiguous_course' rather than "
                 "guessing."
             )
+            lines.append(
+                "That rule is about the course field on a task. A reminder does "
+                "not store a course, so which course it happens to mention "
+                "never makes it ambiguous - keep his wording and set it. "
+                "\"Remind me to email my prof about the quiz\" needs a time, "
+                "not the name of the prof."
+            )
         else:
             lines.append(
                 "No courses are on file yet, so accept whatever course label he uses."

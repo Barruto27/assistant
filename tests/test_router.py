@@ -134,10 +134,14 @@ class RouterTestCase(unittest.TestCase):
         row = self.conn.execute("SELECT tentative FROM tasks").fetchone()
         self.assertEqual(row["tentative"], 1)
 
-    def test_add_task_without_a_title_fails(self) -> None:
-        with self.assertRaises(AssistantError) as ctx:
-            self.route(ParsedIntent(name="add_task", fields={"course": "PSYC 3040"}))
-        self.assertEqual(ctx.exception.code, E.MISSING_FIELD)
+    def test_add_task_without_a_title_asks_for_one(self) -> None:
+        """A question, not an error code. Nothing has gone wrong here."""
+        reply = self.route(ParsedIntent(name="add_task", fields={"course": "PSYC 3040"}))
+        self.assertIn("call it", reply.lower())
+        self.assertNotIn("E103", reply)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"], 0
+        )
 
     def test_add_task_stamps_the_current_week(self) -> None:
         router.handle_message(
@@ -196,22 +200,25 @@ class RouterTestCase(unittest.TestCase):
         self.assertEqual(row["fire_at"], "2026-09-05 17:15:00")
 
     def test_unresolvable_anchor_says_why(self) -> None:
-        with self.assertRaises(AssistantError) as ctx:
-            self.route(
-                ParsedIntent(
-                    name="add_reminder",
-                    fields={"text": "stretch", "anchor": "after my next class"},
-                )
+        reply = self.route(
+            ParsedIntent(
+                name="add_reminder",
+                fields={"text": "stretch", "anchor": "after my next class"},
             )
-        self.assertEqual(ctx.exception.code, E.MISSING_FIELD)
+        )
         # Today's schedule is given to the parser now, so reaching the anchor
         # path means the calendar genuinely didn't settle it.
-        self.assertIn("Nothing left on today's calendar", ctx.exception.message)
+        self.assertIn("Nothing left on today's calendar", reply)
+        self.assertNotIn("E103", reply)
 
     def test_reminder_without_a_time_asks(self) -> None:
-        with self.assertRaises(AssistantError) as ctx:
-            self.route(ParsedIntent(name="add_reminder", fields={"text": "stretch"}))
-        self.assertEqual(ctx.exception.code, E.MISSING_FIELD)
+        """"remind me to buy milk" used to answer "... (E103)"."""
+        reply = self.route(ParsedIntent(name="add_reminder", fields={"text": "stretch"}))
+        self.assertIn("when should i remind you", reply.lower())
+        self.assertNotIn("E103", reply)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) AS n FROM reminders").fetchone()["n"], 0
+        )
 
     def test_due_reminders_respects_sent_flag(self) -> None:
         repo.add_reminder(self.conn, text="a", fire_at="2026-09-05 10:00:00")
@@ -283,11 +290,12 @@ class RouterTestCase(unittest.TestCase):
 
     def test_update_task_with_nothing_to_change(self) -> None:
         repo.add_task(self.conn, title="Essay draft")
-        with self.assertRaises(AssistantError) as ctx:
-            self.route(
-                ParsedIntent(name="update_task", fields={"task_query": "essay"})
-            )
-        self.assertEqual(ctx.exception.code, E.MISSING_FIELD)
+        reply = self.route(
+            ParsedIntent(name="update_task", fields={"task_query": "essay"})
+        )
+        self.assertIn("what should i change", reply.lower())
+        self.assertIn("Essay draft", reply)
+        self.assertNotIn("E103", reply)
 
     def test_archived_tasks_are_not_matched(self) -> None:
         task_id = repo.add_task(self.conn, title="Old reading")

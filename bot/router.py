@@ -90,10 +90,22 @@ def _pretty_time(raw: str | None) -> str | None:
 # ---------------------------------------------------------------------------
 
 
+def _ask(question: str, code: str) -> str:
+    """A clarifying question, logged but not dressed up as a failure.
+
+    Plan Section 4 wants a missing required field to produce one targeted
+    question; Section 8's user-facing codes are for things that actually broke.
+    These were using the second to do the first, so "remind me to buy milk"
+    came back as "When should I remind you? (E103)".
+    """
+    logger.info("[%s] Asking: %s", code, question)
+    return question
+
+
 def _handle_add_task(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
     title = intent.get("title")
     if not title:
-        raise AssistantError(E.MISSING_FIELD, "That task needs a name.")
+        return _ask("What should I call it?", E.MISSING_FIELD)
 
     course = intent.get("course")
     priority = int(intent.get("priority", 2))
@@ -138,17 +150,20 @@ def _handle_add_reminder(conn: sqlite3.Connection, intent: ParsedIntent, now: da
         if anchor:
             resolved = _resolve_anchor(now)
             if resolved is None:
-                raise AssistantError(
-                    E.MISSING_FIELD,
+                return _ask(
                     f"Nothing left on today's calendar tells me when {anchor!r} "
                     "is. Give me a time and I'll set it.",
+                    E.MISSING_FIELD,
                 )
             fire_at, after_what = resolved
             repo.add_reminder(conn, text=text, fire_at=fire_at)
             return (
                 f"Reminder set — {_pretty_time(fire_at)}, after {after_what}: {text}"
             )
-        raise AssistantError(E.MISSING_FIELD, "When should I remind you?")
+        return _ask(
+            "When should I remind you — tonight, tomorrow, or a specific time?",
+            E.MISSING_FIELD,
+        )
 
     repo.add_reminder(conn, text=text, fire_at=fire_at)
     return f"Reminder set — {_pretty_time(fire_at)}: {text}"
@@ -183,8 +198,23 @@ def _resolve_anchor(now: datetime) -> tuple[str, str] | None:
 
 
 def _handle_set_gym_split(conn: sqlite3.Connection, intent: ParsedIntent, now: datetime) -> str:
-    day = int(intent.get("day_of_week"))
     split = intent.get("split_name")
+    if not split:
+        return _ask("Which split — push, pull, legs, rest?", E.MISSING_FIELD)
+
+    raw = intent.get("day_of_week")
+    try:
+        day = int(raw)
+    except (TypeError, ValueError):
+        # Used to be a bare int(None), which is a TypeError rather than an
+        # AssistantError and so escaped as "Something broke on my end."
+        return _ask(f"Which day is {split} on?", E.MISSING_FIELD)
+    if not 0 <= day <= 6:
+        return _ask(
+            f"Which day is {split} on? I read {raw!r}, which isn't a weekday.",
+            E.MISSING_FIELD,
+        )
+
     repo.set_gym_split(conn, day_of_week=day, split_name=split)
     return f"{FULL_WEEKDAYS[day]} is {split}."
 
@@ -267,7 +297,11 @@ def _handle_update_task(conn: sqlite3.Connection, intent: ParsedIntent, now: dat
         if intent.get(key) is not None
     }
     if not changes:
-        raise AssistantError(E.MISSING_FIELD, "What should I change about it?")
+        return _ask(
+            f"What should I change about {task['title']} — the date, the "
+            "priority, or is it done?",
+            E.MISSING_FIELD,
+        )
 
     repo.update_task(conn, task["id"], **changes)
 
@@ -562,6 +596,20 @@ def _run_all(
             failures += 1
             log_error(err)
             reply = err.user_message()
+        except Exception as exc:  # noqa: BLE001
+            # Anything a handler failed to anticipate. Caught here so it costs
+            # one line of the reply rather than the whole message: a bare
+            # int(None) in the gym handler used to discard every other
+            # instruction alongside itself.
+            failures += 1
+            wrapped = AssistantError(
+                E.UNEXPECTED,
+                "Something broke on my end.",
+                cause=exc,
+                trigger=f"{intent.name}: {message}",
+            )
+            log_error(wrapped)
+            reply = wrapped.user_message()
         if reply and reply.strip():
             replies.append(reply.strip())
 

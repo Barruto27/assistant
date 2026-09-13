@@ -118,11 +118,47 @@ class MultipleInstructionsTestCase(Base):
         self.assertEqual(len(reply.strip().splitlines()), 2, "the failure is reported")
 
     def test_everything_failing_raises(self) -> None:
+        """A missing field is a question now, so this needs a real failure.
+
+        A priority outside 1-3 is refused by the table's CHECK constraint: a
+        genuine write failure, not something that could have been asked about.
+        """
         with self.assertRaises(AssistantError):
             self.route([
-                ParsedIntent(name="add_reminder", fields={}),
-                ParsedIntent(name="add_reminder", fields={}),
+                ParsedIntent(name="add_task", fields={"title": "A", "priority": 9}),
+                ParsedIntent(name="add_task", fields={"title": "B", "priority": 9}),
             ])
+
+    def test_one_real_failure_still_leaves_the_rest(self) -> None:
+        reply = self.route([
+            ParsedIntent(name="add_task", fields={
+                "title": "Essay draft", "due_date": "2026-09-18",
+            }),
+            ParsedIntent(name="add_task", fields={"title": "Bad", "priority": 9}),
+        ])
+        self.assertIn("Essay draft", reply)
+        self.assertIn("E401", reply)
+
+    def test_a_handler_that_crashes_does_not_discard_the_others(self) -> None:
+        """_run_all caught only AssistantError, so a TypeError lost everything."""
+        reply = self.route([
+            ParsedIntent(name="add_task", fields={
+                "title": "Essay draft", "due_date": "2026-09-18",
+            }),
+            ParsedIntent(name="set_gym_split", fields={"day_of_week": "not a day"}),
+        ])
+        self.assertIn("Essay draft", reply)
+        self.assertEqual(
+            self.conn.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"], 1
+        )
+
+    def test_a_missing_field_asks_rather_than_failing(self) -> None:
+        reply = self.route([
+            ParsedIntent(name="add_reminder", fields={"text": "stretch"}),
+            ParsedIntent(name="add_reminder", fields={"text": "walk"}),
+        ])
+        self.assertNotIn("E103", reply)
+        self.assertIn("when should i remind you", reply.lower())
 
     def test_the_prompt_asks_for_one_call_per_instruction(self) -> None:
         """The rule that caused this said the opposite."""
