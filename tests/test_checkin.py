@@ -212,5 +212,58 @@ class ApplyTestCase(Base):
         self.assertIn("not a failing", flat)
 
 
+class TomorrowGoalTestCase(unittest.TestCase):
+    """Plan Section 11: ask for tomorrow's goal when there isn't one.
+
+    The half that was never built. The check-in recorded a goal if Kaan
+    volunteered one and otherwise said nothing, so the only daily goals that
+    ever existed were the ones he thought to set unprompted.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.conn = database.connect(Path(self._tmp.name) / "t.sqlite3")
+        database.migrate(self.conn)
+        self.now = datetime(2026, 9, 12, 21, 0)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+        self._tmp.cleanup()
+
+    def rendered(self) -> str:
+        return checkin.render_context(checkin.gather(self.conn, self.now))
+
+    def test_no_goal_at_all_prompts_for_one(self) -> None:
+        self.assertIn("NO GOAL SET FOR TOMORROW", self.rendered())
+
+    def test_todays_goal_does_not_count_for_tomorrow(self) -> None:
+        """It expires tonight, so tomorrow still has nothing."""
+        repo.set_goal(self.conn, text="Finish the reading", tier="daily", now=self.now)
+        self.assertIn("NO GOAL SET FOR TOMORROW", self.rendered())
+
+    def test_a_goal_that_runs_past_tonight_counts(self) -> None:
+        repo.set_goal(self.conn, text="Finish the reading", tier="daily", now=self.now)
+        with database.transaction(self.conn):
+            self.conn.execute("UPDATE goals SET expires_at = '2026-09-13'")
+        self.assertNotIn("NO GOAL SET FOR TOMORROW", self.rendered())
+
+    def test_a_weekly_goal_is_not_a_daily_one(self) -> None:
+        repo.set_goal(self.conn, text="Get ahead on DATT", tier="weekly", now=self.now)
+        self.assertIn("NO GOAL SET FOR TOMORROW", self.rendered())
+
+    def test_a_dropped_goal_does_not_count(self) -> None:
+        repo.set_goal(self.conn, text="Finish the reading", tier="daily", now=self.now)
+        with database.transaction(self.conn):
+            self.conn.execute(
+                "UPDATE goals SET expires_at = '2026-09-13', status = 'dropped'"
+            )
+        self.assertIn("NO GOAL SET FOR TOMORROW", self.rendered())
+
+    def test_the_prompt_asks_once_and_lets_him_ignore_it(self) -> None:
+        self.assertIn("NO GOAL SET FOR TOMORROW", checkin.PROMPT_SYSTEM)
+        self.assertIn("free to ignore", checkin.PROMPT_SYSTEM)
+        self.assertIn("already set", checkin.PROMPT_SYSTEM)
+
+
 if __name__ == "__main__":
     unittest.main()

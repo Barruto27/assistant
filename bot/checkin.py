@@ -46,6 +46,10 @@ class CheckinContext:
     attendance_today: list[sqlite3.Row] = field(default_factory=list)
     due_tomorrow: list[sqlite3.Row] = field(default_factory=list)
     daily_goal: sqlite3.Row | None = None
+    #: True when a daily goal is already set for tomorrow, so the check-in does
+    #: not ask for one. Section 11 wants it asked for when it is missing, and
+    #: not otherwise.
+    tomorrow_goal_set: bool = False
     #: Mail flagged since the last check-in that he has not been asked about.
     #: Never a task - Section 6 keeps him in charge of what gets written - so
     #: the check-in asks whether it needs to become one.
@@ -86,6 +90,17 @@ def gather(conn: sqlite3.Connection, now: datetime) -> CheckinContext:
         "ORDER BY id DESC LIMIT 1"
     ).fetchall()
     context.daily_goal = rows[0] if rows else None
+
+    # A daily goal counts as tomorrow's if it has not expired by then. Today's
+    # goal, set this morning and expiring tonight, does not.
+    context.tomorrow_goal_set = (
+        conn.execute(
+            "SELECT 1 FROM goals WHERE tier = 'daily' AND status = 'active' "
+            "AND (expires_at IS NULL OR expires_at >= ?) LIMIT 1",
+            (tomorrow,),
+        ).fetchone()
+        is not None
+    )
     return context
 
 
@@ -119,6 +134,10 @@ message, however he likes — this is a light check, not a form.
 - If something is due tomorrow that would be easier started tonight, mention it
   in a few words. Do not press.
 - Never ask why something didn't happen. If he says, fine; if not, that's fine.
+- If the facts say NO GOAL SET FOR TOMORROW, close by asking what he wants
+  tomorrow to be about. Once, in a short question he is free to ignore - a
+  daily goal he was nagged into is worth nothing. Say nothing about goals at
+  all when one is already set.
 - No cheerleading, no disappointment. Two or three short lines.
 
 {data}
@@ -163,6 +182,9 @@ def render_context(context: CheckinContext) -> str:
     if context.daily_goal:
         lines.append("")
         lines.append(f"TODAY'S GOAL: {context.daily_goal['text']}")
+    if not context.tomorrow_goal_set:
+        lines.append("")
+        lines.append("NO GOAL SET FOR TOMORROW")
     return "\n".join(lines)
 
 
