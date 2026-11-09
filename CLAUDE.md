@@ -102,6 +102,29 @@ patch to a file and run the file. Always `ast.parse` after writing and assert
 your anchors before `write_text`, so a missed anchor fails before it corrupts
 anything.
 
+**A function that takes a `now` must write it.** `set_goal` accepted a `now`,
+used it for `expires_at`, and left `created_at` to the column default —
+`strftime('now','localtime')`, the real clock. `stalled_goals` measures quiet
+time from `created_at`, so a test asking for a goal created thirty days ago got
+one created this morning. It passed in September because the fixture date and
+the real date were weeks apart, and broke in November when they were not, with
+nothing changed in between. Production never saw it: there `now` defaults to
+`datetime.now()`, so the written value matched the default anyway. That is what
+made it survive — the bug was invisible exactly where it did no harm.
+
+`goals.created_at` was the only stored timestamp driving time-based logic, and
+`set_goal` the only writer ignoring its own `now`; `add_task`, `add_reminder`,
+`save_note` and `remember_flagged` take no `now` and nothing compares their
+stamps against a clock. Keep it that way, and if you add a column that both
+defaults to the real clock and later gets compared to a passed-in time, write it
+explicitly.
+
+**A test that fails with nothing changed is usually telling you the truth.**
+That one looked like date drift to be waited out. It was a real defect, and
+`deploy.sh` caught it on the server and rolled back before it went live — which
+is the whole reason the test gate is there. Do not reach for `--no-verify`
+thinking or wave a red suite through because the diff looks unrelated.
+
 **Test against real data.** Synthetic rows hide the bugs that matter — every
 finding in `scripts/lab/` came from a copy of the real database. A copy starts
 with one task already `done`, so assert on what *changed*, not on row counts.
