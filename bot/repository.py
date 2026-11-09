@@ -357,10 +357,17 @@ def set_goal(
     conn: sqlite3.Connection, *, text: str, tier: str, now: datetime | None = None
 ) -> int:
     moment = now or datetime.now()
+    # created_at is written from `moment` rather than left to the column
+    # default. The default is strftime('now', 'localtime') - the real clock -
+    # so a caller passing `now` got the expiry it asked for and a creation
+    # stamp of today. stalled_goals measures quiet time from created_at, which
+    # made staleness untestable: the tests passed only while the real date
+    # happened to sit near the fixture date, and started failing seven weeks
+    # later for no reason anyone had changed.
     return _write(
         conn,
-        "INSERT INTO goals (text, tier, expires_at) VALUES (?, ?, ?)",
-        (text, tier, _goal_expiry(tier, moment)),
+        "INSERT INTO goals (text, tier, expires_at, created_at) VALUES (?, ?, ?, ?)",
+        (text, tier, _goal_expiry(tier, moment), moment.strftime(TS_FORMAT)),
         "that goal",
     )
 

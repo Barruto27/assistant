@@ -146,6 +146,23 @@ class GoalNudgeTestCase(Base):
                       now=NOW - timedelta(days=30))
         self.assertEqual(repo.stalled_goals(self.conn, NOW), [])
 
+    def test_a_goal_is_created_when_it_says_it_was(self) -> None:
+        """set_goal ignored `now` for created_at and used the real clock.
+
+        stalled_goals measures quiet time from created_at, so staleness was
+        untestable: these tests passed only while the real date sat near the
+        fixture date, then failed seven weeks later with nothing changed.
+        """
+        repo.set_goal(self.conn, text="gym 4 times", tier="weekly",
+                      now=NOW - timedelta(days=30))
+        created = self.conn.execute(
+            "SELECT created_at FROM goals"
+        ).fetchone()["created_at"]
+        self.assertTrue(
+            created.startswith((NOW - timedelta(days=30)).strftime("%Y-%m-%d")),
+            f"created_at is {created!r}, not the date it was told",
+        )
+
     def test_quiet_weekly_goal_is_nudged(self) -> None:
         repo.set_goal(self.conn, text="gym 4 times", tier="weekly",
                       now=NOW - timedelta(days=30))
