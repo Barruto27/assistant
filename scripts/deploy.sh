@@ -28,7 +28,7 @@ REMOTE="${DEPLOY_PATH:-/home/assistant/assistant}"
 # already. Leaving db/database.py out was the opposite mistake - bot/ shipped
 # expecting a helper the server did not have, and the bot would not start.
 PATHS=(bot db/__init__.py db/database.py db/migrations scripts tests deploy
-       site README.md requirements.txt)
+       site README.md CLAUDE.md telegram-assistant-plan.md requirements.txt)
 
 for p in "${PATHS[@]}"; do
   case "$p" in
